@@ -7,6 +7,7 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/ScreenAssistant/Overlay/AnswerLineBreaker.cs" Link="AnswerLineBreaker.cs" />
     <ProjectReference Include="../../src/ScreenAssistant.Core/ScreenAssistant.Core.csproj" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="8.0.0" />

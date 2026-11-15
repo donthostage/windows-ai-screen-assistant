@@ -14,6 +14,9 @@ public partial class OverlayWindow : Window
     private const uint PositionOnly = 0x0001 | 0x0004 | 0x0010;
     private const int DisplayChanged = 0x007E;
     private const int SettingsChanged = 0x001A;
+    private const int MouseActivate = 0x0021;
+    private const int ActivateMessage = 0x0006;
+    private const int MaActivate = 1;
     private const int GwlExstyle = -20;
     private const int WsExAppWindow = 0x00040000;
     private const int WsExToolWindow = 0x00000080;
@@ -100,10 +103,18 @@ public partial class OverlayWindow : Window
         if (!Answer.IsVisible)
             return;
 
-        if (down)
-            Answer.PageDown();
-        else
-            Answer.PageUp();
+        Answer.ScrollPage(down);
+    }
+
+    private void Answer_MouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (_clickThrough || e.ChangedButton != MouseButton.Left)
+            return;
+
+        // Selection needs an active window. The rest of the overlay stays non-activating.
+        AllowActivation();
+        if (!IsActive)
+            Activate();
     }
 
     private void DragHeader(object sender, MouseButtonEventArgs e)
@@ -122,6 +133,16 @@ public partial class OverlayWindow : Window
 
     private nint WindowMessage(nint hwnd, int msg, nint wParam, nint lParam, ref bool handled)
     {
+        if (msg == MouseActivate && !_clickThrough && IsCursorOverAnswer())
+        {
+            AllowActivation();
+            handled = true;
+            return MaActivate;
+        }
+
+        if (msg == ActivateMessage && (wParam & 0xFFFF) == 0)
+            ApplyExtendedStyles();
+
         if (msg is DisplayChanged or SettingsChanged)
         {
             Dispatcher.InvokeAsync(() =>
@@ -183,6 +204,32 @@ public partial class OverlayWindow : Window
             Math.Clamp(targetY, area.Top, maxY), 0, 0, PositionOnly);
     }
 
+    private bool IsCursorOverAnswer()
+    {
+        if (!Answer.IsVisible || Answer.ActualWidth <= 0 || Answer.ActualHeight <= 0)
+            return false;
+        if (!GetCursorPos(out var cursor))
+            return false;
+
+        var topLeft = Answer.PointToScreen(new Point(0, 0));
+        var bottomRight = Answer.PointToScreen(new Point(Answer.ActualWidth, Answer.ActualHeight));
+        var left = Math.Min(topLeft.X, bottomRight.X);
+        var top = Math.Min(topLeft.Y, bottomRight.Y);
+        var right = Math.Max(topLeft.X, bottomRight.X);
+        var bottom = Math.Max(topLeft.Y, bottomRight.Y);
+        return cursor.X >= left - 1 && cursor.X < right + 1 && cursor.Y >= top - 1 && cursor.Y < bottom + 1;
+    }
+
+    private void AllowActivation()
+    {
+        if (_hwnd == 0 || _clickThrough)
+            return;
+
+        var style = GetWindowLong(_hwnd, GwlExstyle);
+        style = (style | WsExToolWindow) & ~WsExAppWindow & ~WsExNoActivate & ~WsExTransparent;
+        SetWindowLong(_hwnd, GwlExstyle, style);
+    }
+
     private void ApplyExtendedStyles()
     {
         if (_hwnd == 0)
@@ -213,6 +260,9 @@ public partial class OverlayWindow : Window
         public RectPixels Monitor, Work;
         public uint Flags;
     }
+
+    [DllImport("user32.dll", ExactSpelling = true)]
+    private static extern bool GetCursorPos(out PointPixels point);
 
     [DllImport("user32.dll", ExactSpelling = true)]
     private static extern nint MonitorFromPoint(PointPixels point, uint flags);
