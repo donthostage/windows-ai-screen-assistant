@@ -42,9 +42,9 @@ internal sealed record OverlayPreferences
             {
                 return settings with
                 {
-                    Width = Math.Clamp(settings.Width, 240, 1000),
-                    CompactHeight = Math.Clamp(settings.CompactHeight, 36, 72),
-                    Height = Math.Clamp(settings.Height, 180, 560),
+                    Width = Math.Clamp(settings.Width, 10, 2400),
+                    CompactHeight = Math.Clamp(settings.CompactHeight, 10, 144),
+                    Height = Math.Clamp(settings.Height, 10, 1400),
                     FontSize = Math.Clamp(settings.FontSize, 12, 26),
                     PanelOpacity = Math.Clamp(settings.PanelOpacity, 0, 1)
                 };

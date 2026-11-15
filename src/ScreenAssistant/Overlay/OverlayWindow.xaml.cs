@@ -24,6 +24,7 @@ public partial class OverlayWindow : Window
     private HwndSource? _source;
     private nint _hwnd;
     private bool _clickThrough;
+    private readonly DispatcherTimer _answerAutoscroll = new() { Interval = TimeSpan.FromMilliseconds(40) };
 
     internal bool IsExcludedFromCapture { get; private set; }
 
@@ -43,6 +44,7 @@ public partial class OverlayWindow : Window
         }
 
         InitializeComponent();
+        _answerAutoscroll.Tick += (_, _) => AdvanceAnswer();
         DataContext = viewModel;
         Width = viewModel.Width;
         Height = viewModel.DisplayHeight;
@@ -88,6 +90,7 @@ public partial class OverlayWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        _answerAutoscroll.Stop();
         _viewModel.PropertyChanged -= ViewModelChanged;
         _source?.RemoveHook(WindowMessage);
         _source = null;
@@ -95,8 +98,49 @@ public partial class OverlayWindow : Window
         base.OnClosed(e);
     }
 
+    private void CompactAnswerUpdated(object sender, System.Windows.Data.DataTransferEventArgs e)
+    {
+        _answerAutoscroll.Stop();
+        CompactScroll.ScrollToHorizontalOffset(0);
+    }
+
+    internal void ToggleAnswerAutoscroll()
+    {
+        if (_answerAutoscroll.IsEnabled)
+            _answerAutoscroll.Stop();
+        else if (IsVisible && !string.IsNullOrWhiteSpace(_viewModel.Text))
+            _answerAutoscroll.Start();
+    }
+
+    private void AdvanceAnswer()
+    {
+        var horizontal = CompactScroll.IsVisible;
+        var viewer = horizontal ? CompactScroll : Answer;
+        var offset = horizontal ? viewer.HorizontalOffset : viewer.VerticalOffset;
+        var limit = horizontal ? viewer.ScrollableWidth : viewer.ScrollableHeight;
+        if (!viewer.IsVisible || offset >= limit - 0.5)
+        {
+            _answerAutoscroll.Stop();
+            return;
+        }
+
+        if (horizontal)
+            viewer.ScrollToHorizontalOffset(Math.Min(offset + 2.4, limit));
+        else
+            viewer.ScrollToVerticalOffset(Math.Min(offset + 1.2, limit));
+    }
+
     internal void ScrollAnswer(bool down)
     {
+        _answerAutoscroll.Stop();
+        if (CompactScroll.IsVisible)
+        {
+            var direction = down ? 1 : -1;
+            var offset = CompactScroll.HorizontalOffset + direction * CompactScroll.ViewportWidth * 0.85;
+            CompactScroll.ScrollToHorizontalOffset(Math.Clamp(offset, 0, CompactScroll.ScrollableWidth));
+            return;
+        }
+
         if (!Answer.IsVisible)
             return;
 

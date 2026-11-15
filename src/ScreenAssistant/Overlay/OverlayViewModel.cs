@@ -15,9 +15,10 @@ internal sealed class OverlayViewModel(OverlayPreferences preferences) : INotify
     public string Text => _state.Text;
     public bool HasError => _state.Phase == OverlayPhase.Error;
     public string CompactText => HasError || _state.Phase == OverlayPhase.Loading || string.IsNullOrWhiteSpace(Text)
-        ? Status : Text.TrimStart().Split(['\r', '\n'], 2)[0].TrimEnd();
+        ? Status : string.Join(" · ", Text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
     public double DisplayHeight => Compact ? CompactHeight : Height;
-    public double CompactFontSize => Math.Min(FontSize, CompactHeight - 14);
+    public bool UsesHorizontalLayout => Compact || DisplayHeight <= 64;
+    public double CompactFontSize => Math.Clamp(DisplayHeight - 14, 1, FontSize);
 
     public bool Compact
     {
@@ -26,6 +27,8 @@ internal sealed class OverlayViewModel(OverlayPreferences preferences) : INotify
         {
             SetAppearance(_preferences with { Compact = value });
             Changed(nameof(DisplayHeight));
+            Changed(nameof(UsesHorizontalLayout));
+            Changed(nameof(CompactFontSize));
         }
     }
 
@@ -48,6 +51,7 @@ internal sealed class OverlayViewModel(OverlayPreferences preferences) : INotify
         {
             SetAppearance(_preferences with { CompactHeight = value });
             Changed(nameof(DisplayHeight));
+            Changed(nameof(UsesHorizontalLayout));
             Changed(nameof(CompactFontSize));
         }
     }
@@ -65,6 +69,8 @@ internal sealed class OverlayViewModel(OverlayPreferences preferences) : INotify
         {
             SetAppearance(_preferences with { Height = value });
             Changed(nameof(DisplayHeight));
+            Changed(nameof(UsesHorizontalLayout));
+            Changed(nameof(CompactFontSize));
         }
     }
 

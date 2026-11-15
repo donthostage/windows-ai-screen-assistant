@@ -226,15 +226,15 @@
 
                                     <Label Grid.Row="1" Target="{Binding ElementName=OverlayWidth}" Content="Ширина"
                                            VerticalAlignment="Center" Margin="0,0,9,0"/>
-                                    <Slider x:Name="OverlayWidth" Grid.Row="1" Grid.Column="1" Minimum="240" Maximum="1000"
+                                    <Slider x:Name="OverlayWidth" Grid.Row="1" Grid.Column="1" Minimum="10" Maximum="2400"
                                             TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding Width}"/>
                                     <TextBlock Grid.Row="1" Grid.Column="2" Style="{StaticResource Value}" Text="{Binding Width, StringFormat=F0}"/>
 
                                     <TextBlock Grid.Row="2" Text="Высота" VerticalAlignment="Center" FontWeight="SemiBold" Margin="0,0,9,0"/>
-                                    <Slider Grid.Row="2" Grid.Column="1" Minimum="36" Maximum="72" TickFrequency="1"
+                                    <Slider Grid.Row="2" Grid.Column="1" Minimum="10" Maximum="144" TickFrequency="1"
                                             IsSnapToTickEnabled="True" Value="{Binding CompactHeight}"
                                             Style="{StaticResource CompactHeightStyle}" AutomationProperties.Name="Высота компактной строки"/>
-                                    <Slider Grid.Row="2" Grid.Column="1" Minimum="180" Maximum="560" TickFrequency="1"
+                                    <Slider Grid.Row="2" Grid.Column="1" Minimum="10" Maximum="1400" TickFrequency="1"
                                             IsSnapToTickEnabled="True" Value="{Binding Height}"
                                             Style="{StaticResource DetailedHeightStyle}" AutomationProperties.Name="Высота многострочного окна"/>
                                     <TextBlock Grid.Row="2" Grid.Column="2" Style="{StaticResource Value}" Text="{Binding DisplayHeight, StringFormat=F0}"/>
@@ -283,7 +283,7 @@
                                AutomationProperties.LiveSetting="Polite"/>
                     <TextBlock x:Name="StatsText" Style="{StaticResource Hint}" Margin="0,2,0,0"/>
                     <TextBlock Style="{StaticResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"
-                               Text="Трей у часов. Крестик — в трей. Выход — из меню иконки. Хоткеи: Ctrl+Alt+M окно · Ctrl+Alt+H оверлей · Ctrl+Alt+L длинная страница · Ctrl+Alt+J/K прокрутка ответа"/>
+                               Text="Трей у часов. Крестик — в трей. Выход — из меню иконки. Хоткеи: Ctrl+Alt+M окно · Ctrl+Alt+H оверлей · Ctrl+Alt+L длинная страница · Ctrl+Alt+J/K листать · Ctrl+Alt+U автопрокрутка"/>
                 </StackPanel>
             </DockPanel>
         </Border>

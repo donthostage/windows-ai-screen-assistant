@@ -89,6 +89,7 @@ public partial class MainWindow : Window
     }
 
     internal event Action<bool>? AnswerScrollRequested;
+    internal event Action? AnswerAutoscrollToggled;
 
     internal void BindOverlaySettings(OverlayViewModel model) => OverlayOptions.DataContext = model;
 
@@ -148,6 +149,9 @@ public partial class MainWindow : Window
                 case AppHotkeys.AnswerPageUp:
                 case AppHotkeys.AnswerPageDown:
                     await OnUiAsync(() => AnswerScrollRequested?.Invoke(id == AppHotkeys.AnswerPageDown));
+                    break;
+                case AppHotkeys.ToggleAnswerAutoscroll:
+                    await OnUiAsync(() => AnswerAutoscrollToggled?.Invoke());
                     break;
                 case AppHotkeys.ShowWindow:
                     await OnUiAsync(ShowFromTray);

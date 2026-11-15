@@ -15,34 +15,37 @@
 
         <Grid Margin="9,5,8,5">
             <Border Background="{Binding HeaderBackground}" Cursor="SizeAll"
-                    Visibility="{Binding Compact, Converter={StaticResource VisibleWhenTrue}}"
+                    Visibility="{Binding UsesHorizontalLayout, Converter={StaticResource VisibleWhenTrue}}"
                     MouseLeftButtonDown="DragHeader" ToolTip="{Binding CompactText}">
-                <TextBlock x:Name="CompactAnswer" Margin="{Binding TextInset}" Text="{Binding CompactText}" FontSize="{Binding CompactFontSize}"
-                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
-                           AutomationProperties.Name="Плавающий ответ" AutomationProperties.LiveSetting="Polite">
-                    <TextBlock.Style>
-                        <Style TargetType="TextBlock">
-                            <Setter Property="Foreground" Value="#F4F7FF"/>
-                            <Setter Property="Effect">
-                                <Setter.Value>
-                                    <DropShadowEffect Color="#070F1C" BlurRadius="3" ShadowDepth="1" Opacity="1"/>
-                                </Setter.Value>
-                            </Setter>
-                            <Style.Triggers>
-                                <DataTrigger Binding="{Binding HasError}" Value="True">
-                                    <Setter Property="Foreground" Value="#FFD0C5"/>
-                                </DataTrigger>
-                            </Style.Triggers>
-                        </Style>
-                    </TextBlock.Style>
-                </TextBlock>
+                <ScrollViewer x:Name="CompactScroll" HorizontalScrollBarVisibility="Hidden"
+                              VerticalScrollBarVisibility="Disabled" Focusable="False" ClipToBounds="True">
+                    <TextBlock x:Name="CompactAnswer" Margin="{Binding TextInset}" Text="{Binding CompactText, NotifyOnTargetUpdated=True}" TargetUpdated="CompactAnswerUpdated" FontSize="{Binding CompactFontSize}"
+                               VerticalAlignment="Center" TextWrapping="NoWrap"
+                               AutomationProperties.Name="Плавающий ответ" AutomationProperties.LiveSetting="Polite">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Foreground" Value="#F4F7FF"/>
+                                <Setter Property="Effect">
+                                    <Setter.Value>
+                                        <DropShadowEffect Color="#070F1C" BlurRadius="3" ShadowDepth="1" Opacity="1"/>
+                                    </Setter.Value>
+                                </Setter>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding HasError}" Value="True">
+                                        <Setter Property="Foreground" Value="#FFD0C5"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </ScrollViewer>
             </Border>
 
             <Grid>
                 <Grid.Style>
                     <Style TargetType="Grid">
                         <Style.Triggers>
-                            <DataTrigger Binding="{Binding Compact}" Value="True">
+                            <DataTrigger Binding="{Binding UsesHorizontalLayout}" Value="True">
                                 <Setter Property="Visibility" Value="Collapsed"/>
                             </DataTrigger>
                         </Style.Triggers>
