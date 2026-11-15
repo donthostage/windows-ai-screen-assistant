@@ -112,11 +112,10 @@
                         <TextBlock Style="{StaticResource Section}" Text="Источник"/>
                         <TextBlock x:Name="SourceText" Style="{StaticResource Hint}"
                                    Text="Выберите монитор в системном окне." Margin="0,5,0,9"/>
-                        <UniformGrid Columns="2" Margin="0,0,0,12">
-                            <Button x:Name="PickButton" Content="Выбрать…" Click="Pick_Click" Margin="0,0,4,0"/>
-                            <Button x:Name="PreviewButton" Content="Снять кадр" Click="Preview_Click" Margin="4,0,0,0"
-                                    ToolTip="Сделать локальный кадр для предпросмотра"/>
-                        </UniformGrid>
+                        <Button x:Name="PickButton" Content="Выбрать источник захвата…" Click="Pick_Click" Margin="0,0,0,8"/>
+                        <Button x:Name="BorderlessButton" Content="Запросить захват без рамки"
+                                Click="Borderless_Click" Margin="0,0,0,10"
+                                IsEnabled="{Binding IsEnabled, ElementName=PickButton}"/>
                         <StackPanel x:Name="SettingsPanel">
                             <TextBlock Style="{StaticResource Section}" Text="AI Tunnel" Margin="0,0,0,8"/>
                             <Label Target="{Binding ElementName=BaseUrl}" Content="Base URL"/>
@@ -130,27 +129,12 @@
                                 <ComboBox x:Name="ModelId" IsEditable="True" IsTextSearchEnabled="False"
                                           AutomationProperties.Name="ID модели" VerticalContentAlignment="Center"/>
                             </DockPanel>
-                            <TextBlock Style="{StaticResource Section}" Text="Тренировка" Margin="0,1,0,8"/>
-                            <Grid Margin="0,0,0,9">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Margin="0,0,4,0">
-                                    <Label Target="{Binding ElementName=Interval}" Content="Интервал, с"/>
-                                    <TextBox x:Name="Interval"/>
-                                </StackPanel>
-                                <StackPanel Grid.Column="1" Margin="4,0,0,0">
-                                    <Label Target="{Binding ElementName=Duration}" Content="Длительность, мин"/>
-                                    <TextBox x:Name="Duration"/>
-                                </StackPanel>
-                            </Grid>
-                            <CheckBox x:Name="SkipIdentical" Content="Пропускать одинаковые кадры" Margin="0,3,0,12"/>
-                            <CheckBox x:Name="UseStreaming" Content="Потоковые ответы" Margin="0,0,0,10"/>
+                            <Label Target="{Binding ElementName=PeriodicInterval}" Content="Интервал анализа, с"/>
+                            <TextBox x:Name="PeriodicInterval" Text="30" Margin="0,0,0,8"/>
                             <Button Content="Сохранить настройки" Click="Save_Click"/>
                         </StackPanel>
                         <TextBlock Style="{StaticResource Hint}" Margin="0,10,0,0"
-                                   Text="При запуске API получит тестовую картинку, затем кадры выбранного источника. Кадры уходят на указанный HTTPS Base URL. Каталог моделей всегда загружается с публичного API AI Tunnel."/>
+                                   Text="Выберите источник и запустите анализ. Для длинной страницы нажмите Ctrl+Alt+L. Запросы отправляются на указанный Base URL."/>
                     </StackPanel>
                 </ScrollViewer>
             </Border>
@@ -178,11 +162,11 @@
                         </Grid>
                     </Border>
                     <TabControl Grid.Row="2" Margin="0,13,0,0" BorderBrush="{StaticResource Line}">
-                        <TabItem Header="Последний ответ">
-                            <TextBox x:Name="AnswerText" Text="Ответ появится после первого анализа."
-                                     IsReadOnly="True" BorderThickness="0" Padding="10" VerticalContentAlignment="Top"
-                                     AutomationProperties.Name="Последний ответ модели"
-                                     TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+                        <TabItem x:Name="AnswerTab" Header="Последний ответ">
+                            <ScrollViewer x:Name="AnswerScroll" VerticalScrollBarVisibility="Auto">
+                                <TextBlock x:Name="AnswerText" Text="Ответ появится после первого анализа."
+                                           Margin="10" TextWrapping="Wrap" AutomationProperties.Name="Последний ответ модели"/>
+                            </ScrollViewer>
                         </TabItem>
                         <TabItem Header="История">
                             <Grid Margin="8">
@@ -195,9 +179,10 @@
                                            Panel.ZIndex="1"/>
                                 <ListBox x:Name="HistoryList" DisplayMemberPath="Label" SelectionChanged="History_Changed"
                                          AutomationProperties.Name="История ответов"/>
-                                <TextBox x:Name="HistoryText" Grid.Row="1" Margin="0,6,0,0" Padding="5"
-                                         IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" VerticalContentAlignment="Top"
-                                         AutomationProperties.Name="Выбранный ответ из истории"/>
+                                <ScrollViewer x:Name="HistoryScroll" Grid.Row="1" Margin="0,6,0,0" VerticalScrollBarVisibility="Auto">
+                                    <TextBlock x:Name="HistoryText" Margin="5" TextWrapping="Wrap"
+                                               AutomationProperties.Name="Выбранный ответ из истории"/>
+                                </ScrollViewer>
                             </Grid>
                         </TabItem>
                         <TabItem Header="Оверлей">
@@ -289,7 +274,7 @@
                 CornerRadius="9" Padding="12,9" Margin="0,13,0,0">
             <DockPanel>
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
-                    <Button x:Name="StartButton" Content="_Запустить" Style="{StaticResource Primary}" Click="Start_Click"
+                    <Button x:Name="StartPeriodicButton" Content="_Запустить анализ" Style="{StaticResource Primary}" Click="StartPeriodic_Click"
                             MinWidth="106" Margin="0,0,6,0"/>
                     <Button x:Name="StopButton" Content="_Остановить" Click="Stop_Click" MinWidth="106"/>
                 </StackPanel>
@@ -298,7 +283,7 @@
                                AutomationProperties.LiveSetting="Polite"/>
                     <TextBlock x:Name="StatsText" Style="{StaticResource Hint}" Margin="0,2,0,0"/>
                     <TextBlock Style="{StaticResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"
-                               Text="Трей у часов. Крестик — в трей. Выход — из меню иконки. Хоткеи: Ctrl+Alt+M окно · Ctrl+Alt+A анализ · Ctrl+Alt+H оверлей · Ctrl+Alt+S старт/стоп · Ctrl+Alt+R область · Ctrl+Alt+Пробел паника"/>
+                               Text="Трей у часов. Крестик — в трей. Выход — из меню иконки. Хоткеи: Ctrl+Alt+M окно · Ctrl+Alt+H оверлей · Ctrl+Alt+L длинная страница · Ctrl+Alt+J/K прокрутка ответа"/>
                 </StackPanel>
             </DockPanel>
         </Border>

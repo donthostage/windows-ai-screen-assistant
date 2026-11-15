@@ -57,10 +57,11 @@
                     <TextBlock Margin="{Binding TextInset}" Text="{Binding Status}" Foreground="#D7E4F8" TextWrapping="Wrap"
                                FontSize="13" AutomationProperties.LiveSetting="Polite"/>
                 </Border>
-                <TextBox x:Name="Answer" Grid.Row="1" Margin="{Binding TextInset}" Text="{Binding Text, Mode=OneWay}" IsReadOnly="True"
-                         FontSize="{Binding FontSize}" Foreground="#F4F7FF" Background="Transparent"
-                         BorderThickness="0" Padding="0,2" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
-                         AutomationProperties.Name="Полный плавающий ответ"/>
+                <ScrollViewer x:Name="Answer" Grid.Row="1" Margin="{Binding TextInset}"
+                              VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Disabled">
+                    <TextBlock Text="{Binding Text}" FontSize="{Binding FontSize}" Foreground="#F4F7FF"
+                               Margin="0,2" TextWrapping="Wrap" AutomationProperties.Name="Полный плавающий ответ"/>
+                </ScrollViewer>
             </Grid>
         </Grid>
     </Grid>

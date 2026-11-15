@@ -18,12 +18,12 @@ public static class FrameGeometry
 
         var x = Math.Clamp(crop.X, 0, width);
         var y = Math.Clamp(crop.Y, 0, height);
-        var w = Math.Min(crop.Width, width - x);
-        var h = Math.Min(crop.Height, height - y);
+        var w = Math.Min((long)crop.X + crop.Width, width) - x;
+        var h = Math.Min((long)crop.Y + crop.Height, height) - y;
         if (w <= 0 || h <= 0)
             return default;
 
-        return new(x, y, w, h);
+        return new(x, y, (int)w, (int)h);
     }
 
     /// <summary>

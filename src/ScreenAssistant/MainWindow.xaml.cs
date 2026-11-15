@@ -1,6 +1,5 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
@@ -8,9 +7,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using ScreenAssistant.Configuration;
 using ScreenAssistant.Core.AIClient;
-using ScreenAssistant.Core.Geometry;
 using ScreenAssistant.Core.Overlay;
-using ScreenAssistant.Core.Scheduler;
 using ScreenAssistant.Hotkeys;
 using ScreenAssistant.Overlay;
 using ScreenAssistant.ScreenCapture;
@@ -26,39 +23,39 @@ public partial class MainWindow : Window
     private static readonly Brush Error = Brushes.Firebrick;
 
     private readonly AiClient _ai;
-    private readonly AnalysisScheduler _scheduler;
     private readonly IOverlayService _overlay;
     private readonly Action<bool> _persistOverlayEnabled;
     private readonly ObservableCollection<HistoryEntry> _history = new();
     private GraphicsCaptureItem? _source;
-    private CaptureSession? _capture;
     private Uri? _keyEndpoint;
     private CancellationTokenSource? _operation;
-    private CancellationTokenSource? _requestCancel;
+    private TaskCompletionSource? _operationFinished;
+    private long _requestVersion;
+    private readonly DispatcherTimer _periodicTimer = new();
+    private PeriodicAnalysis? _periodic;
+    private string? _lastAnalyzedFrame;
+    private TimeSpan _retryDelay;
     private HotkeyManager? _hotkeys;
     private AppTrayIcon? _tray;
     private HwndSource? _hwndSource;
-    private CropRect? _crop;
+    private bool _borderlessCapture;
     private bool _initialized;
     private bool _closing;
     private bool _exitRequested;
     private bool _shutdownComplete;
     private bool _sourceLost;
     private bool _operationUsesSource;
-    private bool _sessionActive;
     private int _requests;
     private int _answers;
-    private int _skipped;
-    private string? _lastSuccessfulFingerprint;
 
-    internal MainWindow(AiClient ai, AnalysisScheduler scheduler, IOverlayService overlay,
+    internal MainWindow(AiClient ai, IOverlayService overlay,
         bool overlayEnabled, Action<bool> persistOverlayEnabled)
     {
         _ai = ai;
-        _scheduler = scheduler;
         _overlay = overlay;
         _persistOverlayEnabled = persistOverlayEnabled;
         InitializeComponent();
+        _periodicTimer.Tick += async (_, _) => await AnalyzePeriodicFrameAsync();
         ShowInTaskbar = false;
         HistoryList.ItemsSource = _history;
         OverlayEnabled.IsChecked = overlayEnabled;
@@ -78,28 +75,20 @@ public partial class MainWindow : Window
             var settings = UserSettings.Load();
             BaseUrl.Text = settings.BaseUrl;
             ModelId.Text = settings.Model;
-            Interval.Text = settings.IntervalSeconds.ToString(CultureInfo.InvariantCulture);
-            Duration.Text = settings.DurationMinutes.ToString(CultureInfo.InvariantCulture);
-            SkipIdentical.IsChecked = settings.SkipIdenticalFrames;
-            UseStreaming.IsChecked = settings.UseStreaming;
-            _crop = settings.GetStoredCrop();
-            if (_crop is { } stored && !stored.IsEmpty)
-                FrameDetails.Text = $"область {stored.Width} × {stored.Height} · {stored.X}, {stored.Y}";
+            PeriodicInterval.Text = settings.IntervalSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
         catch (Exception ex)
         {
             LocalFiles.Log("settings-load", ex);
             BaseUrl.Text = AiClient.DefaultBaseUrl;
-            Interval.Text = "30";
-            Duration.Text = "120";
-            SkipIdentical.IsChecked = true;
-            UseStreaming.IsChecked = true;
             Status("Настройки не загрузились. Восстановлены значения по умолчанию.", error: true);
         }
 
         UpdateControls();
         UpdateStats();
     }
+
+    internal event Action<bool>? AnswerScrollRequested;
 
     internal void BindOverlaySettings(OverlayViewModel model) => OverlayOptions.DataContext = model;
 
@@ -150,20 +139,15 @@ public partial class MainWindow : Window
         {
             switch (id)
             {
-                case AppHotkeys.Analyze:
-                    await HotkeyAnalyzeAsync();
-                    break;
                 case AppHotkeys.Overlay:
                     await OnUiAsync(() => OverlayEnabled.IsChecked = OverlayEnabled.IsChecked != true);
                     break;
-                case AppHotkeys.Session:
-                    await HotkeySessionAsync();
+                case AppHotkeys.Scroll:
+                    await AnalyzeScrollAsync();
                     break;
-                case AppHotkeys.Crop:
-                    await OnUiAsync(SelectCrop);
-                    break;
-                case AppHotkeys.Panic:
-                    await PanicAsync();
+                case AppHotkeys.AnswerPageUp:
+                case AppHotkeys.AnswerPageDown:
+                    await OnUiAsync(() => AnswerScrollRequested?.Invoke(id == AppHotkeys.AnswerPageDown));
                     break;
                 case AppHotkeys.ShowWindow:
                     await OnUiAsync(ShowFromTray);
@@ -175,133 +159,6 @@ public partial class MainWindow : Window
             LocalFiles.Log("hotkey", ex);
             await OnUiAsync(() => Status("Горячая клавиша завершилась ошибкой. Подробности в журнале.", error: true));
         }
-    }
-
-    private async Task HotkeyAnalyzeAsync()
-    {
-        if (_source is null)
-        {
-            await OnUiAsync(() => Status("Сначала выберите источник захвата.", error: true));
-            return;
-        }
-
-        UserSettings settings = new();
-        Uri endpoint = null!;
-        var key = "";
-        var ready = false;
-        await OnUiAsync(() =>
-        {
-            if (!ReadSettings(out settings, out endpoint))
-                return;
-            key = ApiKey.Password.Trim();
-            if (key.Length == 0)
-            {
-                Status("Для анализа нужны настройки и API-ключ.", error: true);
-                return;
-            }
-
-            ready = true;
-        });
-        if (!ready)
-            return;
-
-        var source = _source;
-        if (_sessionActive)
-        {
-            var triggered = await _scheduler.TriggerAsync(
-                token => AnalyzeOnceAsync(source, settings, endpoint, key, token), default);
-            if (!triggered)
-                await OnUiAsync(() => Status("Анализ уже выполняется."));
-            return;
-        }
-
-        if (_operation is not null)
-            return;
-
-        await RunOperationAsync("oneshot", async token =>
-        {
-            await AnalyzeOnceAsync(source, settings, endpoint, key, token);
-        }, usesSource: true);
-    }
-
-    private async Task HotkeySessionAsync()
-    {
-        if (_operation is not null)
-        {
-            await OnUiAsync(() =>
-            {
-                Status("Останавливаем операцию…");
-                _operation.Cancel();
-                UpdateControls();
-            });
-            return;
-        }
-
-        await StartSessionAsync();
-    }
-
-    private void SelectCrop()
-    {
-        var picker = new CropSelectionWindow();
-        if (picker.ShowDialog() != true)
-        {
-            _crop = null;
-            FrameDetails.Text = "";
-            PersistCrop(null);
-            Status("Область анализа сброшена.");
-            return;
-        }
-
-        var relative = MonitorGeometry.ToMonitorRelative(picker.SelectedPixels, picker.SelectedMonitor);
-        _crop = relative.IsEmpty ? null : relative;
-        if (_crop is null)
-        {
-            FrameDetails.Text = "";
-            PersistCrop(null);
-            Status("Область слишком маленькая.", error: true);
-            return;
-        }
-
-        FrameDetails.Text = $"область {_crop.Value.Width} × {_crop.Value.Height} · {_crop.Value.X}, {_crop.Value.Y}";
-        PersistCrop(_crop);
-        Status("Область анализа выбрана.");
-    }
-
-    private void PersistCrop(CropRect? crop)
-    {
-        if (!ReadSettings(out var settings, out _))
-            return;
-
-        try
-        {
-            var next = settings with
-            {
-                CropX = crop?.X,
-                CropY = crop?.Y,
-                CropWidth = crop?.Width,
-                CropHeight = crop?.Height
-            };
-            next.Save();
-        }
-        catch (Exception ex)
-        {
-            LocalFiles.Log("crop-save", ex);
-        }
-    }
-
-    private async Task PanicAsync()
-    {
-        _requestCancel?.Cancel();
-        try
-        {
-            await _overlay.HideForAsync(TimeSpan.FromSeconds(3));
-        }
-        catch (Exception ex)
-        {
-            LocalFiles.Log("panic-hide", ex);
-        }
-
-        await OnUiAsync(() => Status("Паника: оверлей скрыт, текущий запрос отменён."));
     }
 
     private async void OverlayToggle_Changed(object sender, RoutedEventArgs e)
@@ -374,17 +231,39 @@ public partial class MainWindow : Window
             });
         });
 
-    private async void Preview_Click(object sender, RoutedEventArgs e)
+    private async void Borderless_Click(object sender, RoutedEventArgs e)
     {
-        if (_source is not { } source)
-            return;
-
-        await RunOperationAsync("preview", async token =>
+        if (_borderlessCapture)
         {
-            await OnUiAsync(() => Status("Получаем локальный кадр…"));
-            await CaptureAsync(source, token);
-            await OnUiAsync(() => Status("Локальный кадр готов."));
-        }, usesSource: true);
+            _borderlessCapture = false;
+            BorderlessButton.Content = "Запросить захват без рамки";
+            Status("Захват с системной рамкой.");
+            return;
+        }
+
+        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
+        {
+            Status("Для захвата без рамки нужна пакетная версия на Windows 11.", error: true);
+            return;
+        }
+
+        await RunOperationAsync("borderless-consent", async token =>
+        {
+            try
+            {
+                var access = await GraphicsCaptureAccess.RequestAccessAsync(GraphicsCaptureAccessKind.Borderless).AsTask(token);
+                _borderlessCapture = access == Windows.Security.Authorization.AppCapabilityAccess.AppCapabilityAccessStatus.Allowed;
+                if (_borderlessCapture)
+                    BorderlessButton.Content = "Вернуть системную рамку";
+                Status(_borderlessCapture ? "Windows разрешила захват без рамки."
+                    : "Windows не разрешила захват без рамки.", error: !_borderlessCapture);
+            }
+            catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                LocalFiles.Log("borderless-consent", ex);
+                Status("Для захвата без рамки запустите установленную MSIX-версию.", error: true);
+            }
+        });
     }
 
     private async void Catalog_Click(object sender, RoutedEventArgs e) =>
@@ -421,177 +300,195 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void Start_Click(object sender, RoutedEventArgs e) => await StartSessionAsync();
-
-    private async Task StartSessionAsync()
+    private async Task<bool> ReplaceOperationAsync()
     {
-        if (_operation is not null)
+        var version = ++_requestVersion;
+        while (_operation is { } previous && _operationFinished is { } finished)
+        {
+            previous.Cancel();
+            await finished.Task;
+            if (version != _requestVersion || _closing || _shutdownComplete)
+                return false;
+        }
+
+        return !_closing && !_shutdownComplete;
+    }
+
+    private void AddAnswer(string model, string result, bool selectAnswerTab = true)
+    {
+        _answers++;
+        UpdateStats();
+        if (selectAnswerTab)
+            AnswerTab.IsSelected = true;
+        AnswerText.Text = result;
+        AnswerScroll.ScrollToTop();
+        _history.Insert(0, new HistoryEntry(DateTimeOffset.Now, model, result));
+        if (_history.Count > 200)
+            _history.RemoveAt(_history.Count - 1);
+        HistoryEmpty.Visibility = Visibility.Collapsed;
+        HistoryList.SelectedIndex = 0;
+    }
+
+    private async void StartPeriodic_Click(object sender, RoutedEventArgs e)
+    {
+        if (_operation is not null || _periodic is not null || _source is not { } source
+            || !ReadSettings(out var settings, out var endpoint))
             return;
 
-        GraphicsCaptureItem? source = null;
-        UserSettings settings = new();
-        Uri endpoint = null!;
-        var key = "";
-        var ready = false;
-        await OnUiAsync(() =>
+        var key = ApiKey.Password.Trim();
+        if (key.Length == 0 || string.IsNullOrWhiteSpace(settings.Model))
         {
-            if (_source is not { } item || !ReadSettings(out settings, out endpoint))
-                return;
+            Status("Выберите модель и введите ключ.", error: true);
+            return;
+        }
+        if (!int.TryParse(PeriodicInterval.Text, out var seconds) || seconds is < 5 or > 3600)
+        {
+            Status("Интервал должен быть от 5 до 3600 секунд.", error: true);
+            return;
+        }
 
-            key = ApiKey.Password.Trim();
-            if (key.Length == 0 || key.Any(char.IsWhiteSpace) || key.Any(char.IsControl))
-            {
-                Status("Введите действительный API-ключ без пробелов.", error: true);
-                ApiKey.Focus();
-                return;
-            }
-            if (settings.Model.Length == 0)
-            {
-                Status("Выберите модель из каталога или введите её ID.", error: true);
-                ModelId.Focus();
-                return;
-            }
+        _periodic = new(source, endpoint, key, settings.Model, TimeSpan.FromSeconds(seconds));
+        _lastAnalyzedFrame = null;
+        await AnalyzePeriodicFrameAsync();
+    }
 
-            try
-            {
-                KeyStore.Save(endpoint, key);
-                settings.Save();
-            }
-            catch (Exception ex)
-            {
-                LocalFiles.Log("settings-autosave", ex);
-                Status("Не удалось сохранить ключ и настройки перед запуском.", error: true);
-                return;
-            }
-
-            source = item;
-            ready = true;
-        });
-        if (!ready || source is null)
+    private async Task AnalyzePeriodicFrameAsync()
+    {
+        _periodicTimer.Stop();
+        if (_periodic is not { } session || _operation is not null || _closing || _shutdownComplete)
             return;
 
-        await RunOperationAsync("session", async token =>
+        await RunOperationAsync("periodic", async token =>
         {
-            await OnUiAsync(() => Status("API проверяет модель на тестовой картинке…"));
-            await _overlay.BeginAsync("Проверяем модель…", reset: true);
-            var (image, colors) = FrameEncoding.CreateVisionProbe();
-            await _ai.VerifyVisionAsync(endpoint, key, settings.Model, image, colors, token);
-            token.ThrowIfCancellationRequested();
-
-            await OnUiAsync(() =>
+            Status("Периодический анализ · получаем кадр…");
+            var frame = await CaptureAsync(session.Source, token);
+            if (frame.Fingerprint == _lastAnalyzedFrame)
             {
-                _history.Clear();
-                HistoryEmpty.Visibility = Visibility.Visible;
-                AnswerText.Text = "Ответ появится после первого анализа.";
-                _lastSuccessfulFingerprint = null;
-                _requests = _answers = _skipped = 0;
-                UpdateStats();
-            });
-
-            await using var capture = new CaptureSession();
-            await capture.StartAsync(source, token);
-            _capture = capture;
-            _sessionActive = true;
-            await _overlay.SetClickThroughAsync(true);
-            try
-            {
-                var end = await _scheduler.RunAsync(
-                    TimeSpan.FromSeconds(settings.IntervalSeconds),
-                    TimeSpan.FromMinutes(settings.DurationMinutes),
-                    sessionToken => AnalyzeOnceAsync(source, settings, endpoint, key, sessionToken), token);
-
-                var finalStatus = _sourceLost ? "Источник захвата закрыт. Выберите экран повторно."
-                    : end == SessionEnd.DurationElapsed ? "Время тренировки истекло."
-                    : "Тренировка остановлена.";
-                await OnUiAsync(() => Status(finalStatus, error: _sourceLost));
-                await _overlay.EndAsync(finalStatus, error: _sourceLost);
+                Status("Кадр не изменился. Ждём следующий снимок.");
+                return;
             }
-            finally
-            {
-                _sessionActive = false;
-                _capture = null;
-                try { await _overlay.SetClickThroughAsync(false); }
-                catch (Exception ex) { LocalFiles.Log("overlay-click-through", ex); }
-            }
+
+            _requests++;
+            UpdateStats();
+            Status("Периодический анализ · ждём ответ…");
+            await ShowAnalysisAsync(session.Model,
+                ct => _ai.AnalyzeAsync(session.Endpoint, session.Key, session.Model, frame.Payload, ct),
+                frame.Fingerprint, "Ответ готов. Периодический анализ продолжается.", token);
         }, usesSource: true);
     }
 
-    private async Task<TimeSpan?> AnalyzeOnceAsync(GraphicsCaptureItem source, UserSettings settings,
-        Uri endpoint, string key, CancellationToken token)
+    private async Task ShowAnalysisAsync(string model, Func<CancellationToken, Task<string>> analyze,
+        string? lastFrame, string status, CancellationToken token)
     {
-        using var request = CancellationTokenSource.CreateLinkedTokenSource(token);
-        _requestCancel = request;
+        var requestId = await _overlay.BeginAsync("Анализируем изображение…");
         try
         {
-            await OnUiAsync(() => Status("Тренировка идёт · получаем кадр…"));
-            var image = await CaptureAsync(source, request.Token);
-            if (settings.SkipIdenticalFrames && image.Fingerprint == _lastSuccessfulFingerprint)
+            var result = MathText.Format(await analyze(token));
+            token.ThrowIfCancellationRequested();
+            await _overlay.CompleteAsync(requestId, result);
+            token.ThrowIfCancellationRequested();
+            _lastAnalyzedFrame = lastFrame;
+            AddAnswer(model, result, selectAnswerTab: false);
+            Status(status);
+        }
+        catch (AiException ex)
+        {
+            await _overlay.FailAsync(requestId, ex.Message);
+            throw;
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            await _overlay.EndAsync("Запрос отменён.");
+            throw;
+        }
+    }
+
+    private void SchedulePeriodicFrame()
+    {
+        _periodicTimer.Stop();
+        if (_periodic is not { } session || _operation is not null || _closing || _shutdownComplete)
+            return;
+
+        var delay = _retryDelay > session.Interval ? _retryDelay : session.Interval;
+        _periodicTimer.Interval = TimeSpan.FromMilliseconds(Math.Min(delay.TotalMilliseconds, int.MaxValue));
+        _periodicTimer.Start();
+    }
+
+    private void StopPeriodic()
+    {
+        _periodicTimer.Stop();
+        _periodic = null;
+        _retryDelay = TimeSpan.Zero;
+    }
+
+    private async Task AnalyzeScrollAsync()
+    {
+        if (_closing || _shutdownComplete)
+            return;
+        if (_source is not { } source)
+        {
+            ShowFromTray();
+            Status("Сначала выберите источник захвата.", error: true);
+            return;
+        }
+        if (!ReadSettings(out var settings, out var endpoint))
+        {
+            ShowFromTray();
+            return;
+        }
+        var key = ApiKey.Password.Trim();
+        if (key.Length == 0 || string.IsNullOrWhiteSpace(settings.Model))
+        {
+            ShowFromTray();
+            Status("Выберите модель и введите ключ.", error: true);
+            return;
+        }
+
+        if (!await ReplaceOperationAsync())
+            return;
+
+        if (!Equals(_source, source))
+        {
+            ShowFromTray();
+            Status("Источник захвата изменился. Запустите анализ заново.", error: true);
+            return;
+        }
+
+        await RunOperationAsync("scroll", async token =>
+        {
+            await OnUiAsync(() => Status("Через 3 секунды начнётся сбор. Перейдите к началу страницы."));
+            await Task.Delay(TimeSpan.FromSeconds(3), token);
+            var frames = new List<ImagePayload>();
+            var fingerprints = new HashSet<string>();
+            string? lastFrame = null;
+            var bytes = 0;
+            for (var i = 0; i < 8; i++)
             {
-                await OnUiAsync(() =>
+                await OnUiAsync(() => Status($"Медленно прокручивайте страницу · снимок {i + 1} из 8."));
+                var frame = await CaptureAsync(source, token);
+                if (fingerprints.Add(frame.Fingerprint))
                 {
-                    _skipped++;
-                    UpdateStats();
-                    Status("Тренировка идёт · кадр совпал с последним проанализированным.");
-                });
-                return null;
+                    if (frames.Count > 0 && bytes + frame.Payload.Bytes.Length > 20 * 1024 * 1024)
+                        break;
+
+                    frames.Add(frame.Payload);
+                    bytes += frame.Payload.Bytes.Length;
+                }
+                lastFrame = frame.Fingerprint;
+                if (i < 7)
+                    await Task.Delay(TimeSpan.FromSeconds(2), token);
             }
 
-            await OnUiAsync(() => Status("Тренировка идёт · ждём ответ API…"));
-            var requestId = await _overlay.BeginAsync("Ждём ответ модели…");
             await OnUiAsync(() =>
             {
                 _requests++;
                 UpdateStats();
+                Status($"Анализируем: кадров {frames.Count}…");
             });
-            try
-            {
-                var text = await Task.Run(() => settings.UseStreaming
-                    ? _ai.AnalyzeStreamingAsync(endpoint, key, settings.Model, image.Payload,
-                        delta => request.IsCancellationRequested
-                            ? Task.CompletedTask : _overlay.AppendAsync(requestId, delta), request.Token)
-                    : _ai.AnalyzeAsync(endpoint, key, settings.Model, image.Payload, request.Token),
-                    request.Token);
-                request.Token.ThrowIfCancellationRequested();
-                await _overlay.CompleteAsync(requestId, text);
-                await OnUiAsync(() =>
-                {
-                    _answers++;
-                    _lastSuccessfulFingerprint = image.Fingerprint;
-                    AnswerText.Text = text;
-                    AnswerText.ScrollToHome();
-                    _history.Insert(0, new HistoryEntry(DateTimeOffset.Now, settings.Model, text));
-                    if (_history.Count > 200)
-                        _history.RemoveAt(_history.Count - 1);
-                    HistoryEmpty.Visibility = Visibility.Collapsed;
-                    HistoryList.SelectedIndex = 0;
-                    Status("Тренировка идёт · ответ получен.");
-                });
-            }
-            catch (OperationCanceledException) when (request.IsCancellationRequested && !token.IsCancellationRequested)
-            {
-                await _overlay.FailAsync(requestId, "Запрос отменён.");
-                return null;
-            }
-            catch (AiException ex) when (!ex.RequiresConfigurationChange)
-            {
-                LocalFiles.Log("analysis", ex);
-                var next = ex.RetryAfter is { } delay && delay > TimeSpan.Zero
-                    ? $" Пауза API не менее {Math.Ceiling(delay.TotalSeconds):0} с."
-                    : " Следующая попытка по интервалу.";
-                var message = ex.Message + next;
-                await OnUiAsync(() => Status(message, error: true));
-                await _overlay.FailAsync(requestId, message);
-                return ex.RetryAfter;
-            }
-            finally { await OnUiAsync(UpdateStats); }
-
-            return null;
-        }
-        finally
-        {
-            if (ReferenceEquals(_requestCancel, request))
-                _requestCancel = null;
-        }
+            await ShowAnalysisAsync(settings.Model,
+                ct => Task.Run(() => _ai.AnalyzeScrollAsync(endpoint, key, settings.Model, frames, ct), ct),
+                lastFrame, $"Ответ по серии готов · кадров {frames.Count}.", token);
+        }, usesSource: true);
     }
 
     private async Task<CapturedImage> CaptureAsync(GraphicsCaptureItem source, CancellationToken token)
@@ -603,21 +500,14 @@ public partial class MainWindow : Window
         });
         try
         {
-            CapturedImage image;
-            if (_capture is not null)
-                image = await _capture.TakeAsync(_crop, token);
-            else
-                image = await GraphicsCapture.TakeOnceAsync(source, _crop, token);
+            var image = await GraphicsCapture.TakeOnceAsync(source, null, token, _borderlessCapture);
 
             token.ThrowIfCancellationRequested();
             await OnUiAsync(() =>
             {
                 PreviewImage.Source = FrameEncoding.Decode(image.Payload);
                 PreviewEmpty.Visibility = Visibility.Collapsed;
-                var cropLabel = _crop is { } c
-                    ? $"область {c.Width} × {c.Height} · {c.X}, {c.Y}"
-                    : $"{image.Width} × {image.Height}";
-                FrameDetails.Text = $"{cropLabel}   ·   {DateTime.Now:HH:mm:ss}";
+                FrameDetails.Text = $"{image.Width} × {image.Height}   ·   {DateTime.Now:HH:mm:ss}";
             });
             return image;
         }
@@ -637,59 +527,77 @@ public partial class MainWindow : Window
         if (_operation is not null || _closing || _shutdownComplete)
             return;
 
+        _periodicTimer.Stop();
+        if (name == "periodic")
+            _retryDelay = TimeSpan.Zero;
         using var cancellation = new CancellationTokenSource();
+        var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _operationFinished = finished;
         _operation = cancellation;
         _operationUsesSource = usesSource;
         _sourceLost = false;
         await OnUiAsync(UpdateControls);
+        Task ReportErrorAsync(string message) => OnUiAsync(() =>
+        {
+            if (name == "scroll" && !_closing)
+                ShowFromTray();
+            Status(message, error: true);
+        });
+
         try { await action(cancellation.Token); }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
             var message = _sourceLost ? "Источник захвата закрыт. Выберите экран повторно."
                 : "Операция остановлена.";
-            await OnUiAsync(() => Status(message, error: _sourceLost));
-            if (name == "session")
-                await _overlay.EndAsync(message, error: _sourceLost);
+            if (_sourceLost)
+                await ReportErrorAsync(message);
+            else
+                await OnUiAsync(() => Status(message));
         }
         catch (CaptureException ex)
         {
             LocalFiles.Log(name, ex);
-            await OnUiAsync(() => Status(ex.Message, error: true));
-            if (name == "session")
-                await _overlay.EndAsync(ex.Message, error: true);
+            await ReportErrorAsync(ex.Message);
         }
         catch (AiException ex)
         {
+            if (name == "periodic" && ex.RequiresConfigurationChange)
+                StopPeriodic();
+            else if (ex.RetryAfter is { } delay && delay > _retryDelay)
+                _retryDelay = delay;
             LocalFiles.Log(name, ex);
-            await OnUiAsync(() => Status(ex.Message, error: true));
-            if (name == "session")
-                await _overlay.EndAsync(ex.Message, error: true);
+            await ReportErrorAsync(ex.Message);
         }
         catch (Exception ex)
         {
             LocalFiles.Log(name, ex);
             const string message = "Операция завершилась ошибкой. Подробности в журнале.";
-            await OnUiAsync(() => Status(message, error: true));
-            if (name == "session")
-                await _overlay.EndAsync(message, error: true);
+            await ReportErrorAsync(message);
         }
         finally
         {
             _operation = null;
-            _sessionActive = false;
-            await OnUiAsync(UpdateControls);
-            if (_closing)
-                await FinishCloseAsync();
+            _operationFinished = null;
+            try
+            {
+                await OnUiAsync(() =>
+                {
+                    UpdateControls();
+                    SchedulePeriodicFrame();
+                });
+                if (_closing)
+                    await FinishCloseAsync();
+            }
+            finally { finished.TrySetResult(); }
         }
     }
 
     private void Stop_Click(object sender, RoutedEventArgs e)
     {
-        if (_operation is null)
-            return;
-
-        Status("Останавливаем операцию…");
-        _operation.Cancel();
+        _requestVersion++;
+        StopPeriodic();
+        _operation?.Cancel();
+        Status(_operation is null ? "Анализ остановлен." : "Останавливаем операцию…");
         UpdateControls();
     }
 
@@ -699,6 +607,7 @@ public partial class MainWindow : Window
             if (_source is null || !Equals(item, _source))
                 return;
 
+            StopPeriodic();
             _sourceLost = _operationUsesSource && _operation is not null;
             if (_sourceLost)
                 _operation?.Cancel();
@@ -713,8 +622,7 @@ public partial class MainWindow : Window
     {
         PreviewImage.Source = null;
         PreviewEmpty.Visibility = Visibility.Visible;
-        if (_crop is null)
-            FrameDetails.Text = "";
+        FrameDetails.Text = "";
     }
 
     private void DetachSource()
@@ -727,7 +635,7 @@ public partial class MainWindow : Window
     private void History_Changed(object sender, SelectionChangedEventArgs e)
     {
         HistoryText.Text = (HistoryList.SelectedItem as HistoryEntry)?.Text ?? "";
-        HistoryText.ScrollToHome();
+        HistoryScroll.ScrollToTop();
     }
 
     private bool ReadSettings(out UserSettings settings, out Uri endpoint)
@@ -740,32 +648,13 @@ public partial class MainWindow : Window
             BaseUrl.Focus();
             return false;
         }
-        if (!int.TryParse(Interval.Text, out var interval) || interval is < 5 or > 3600)
-        {
-            Status("Интервал должен быть от 5 до 3600 секунд.", error: true);
-            Interval.Focus();
-            return false;
-        }
-        if (!int.TryParse(Duration.Text, out var duration) || duration is < 1 or > 720)
-        {
-            Status("Длительность должна быть от 1 до 720 минут.", error: true);
-            Duration.Focus();
-            return false;
-        }
-
         endpoint = parsed!;
         settings = new UserSettings
         {
             BaseUrl = endpoint.AbsoluteUri.TrimEnd('/'),
             Model = ModelId.Text.Trim(),
-            IntervalSeconds = interval,
-            DurationMinutes = duration,
-            SkipIdenticalFrames = SkipIdentical.IsChecked == true,
-            UseStreaming = UseStreaming.IsChecked == true,
-            CropX = _crop?.X,
-            CropY = _crop?.Y,
-            CropWidth = _crop?.Width,
-            CropHeight = _crop?.Height
+            IntervalSeconds = int.TryParse(PeriodicInterval.Text, out var interval) && interval is >= 5 and <= 3600
+                ? interval : 30
         };
         return true;
     }
@@ -773,13 +662,15 @@ public partial class MainWindow : Window
     private void UpdateControls()
     {
         var idle = _operation is null;
-        PickButton.IsEnabled = SettingsPanel.IsEnabled = idle;
-        PreviewButton.IsEnabled = StartButton.IsEnabled = idle && _source is not null;
-        StopButton.IsEnabled = _operation is { IsCancellationRequested: false };
+        PickButton.IsEnabled = idle && _periodic is null;
+        SettingsPanel.IsEnabled = idle;
+        StartPeriodicButton.IsEnabled = idle && _periodic is null && _source is not null;
+
+        StopButton.IsEnabled = _periodic is not null || _operation is { IsCancellationRequested: false };
     }
 
     private void UpdateStats() =>
-        StatsText.Text = $"Запросы кадров {_requests}   ·   Ответы {_answers}   ·   Пропущено {_skipped}";
+        StatsText.Text = $"Запросы {_requests}   ·   Ответы {_answers}";
 
     private void Status(string text, bool error = false)
     {
@@ -824,6 +715,7 @@ public partial class MainWindow : Window
 
     private void RequestExit()
     {
+        StopPeriodic();
         _exitRequested = true;
         if (_operation is not null)
         {
@@ -866,6 +758,7 @@ public partial class MainWindow : Window
             return;
 
         _closing = true;
+        StopPeriodic();
         _exitRequested = true;
         DetachSource();
         _hotkeys?.Dispose();
@@ -874,19 +767,14 @@ public partial class MainWindow : Window
         _hwndSource = null;
         _tray?.Dispose();
         _tray = null;
-        if (_capture is not null)
-        {
-            try { await _capture.DisposeAsync(); }
-            catch (Exception ex) { LocalFiles.Log("capture-dispose", ex); }
-            _capture = null;
-        }
-
         try { await _overlay.ShutdownAsync(); }
         catch (Exception ex) { LocalFiles.Log("overlay-shutdown", ex); }
 
         _shutdownComplete = true;
         await OnUiAsync(Close);
     }
+
+    private sealed record PeriodicAnalysis(GraphicsCaptureItem Source, Uri Endpoint, string Key, string Model, TimeSpan Interval);
 
     private sealed record HistoryEntry(DateTimeOffset Time, string Model, string Text)
     {

@@ -28,7 +28,7 @@ internal static class FrameEncoding
             ? FrameGeometry.NormalizeCrop(requested, bitmap.PixelWidth, bitmap.PixelHeight)
             : new CropRect(0, 0, bitmap.PixelWidth, bitmap.PixelHeight);
         if (bounds.IsEmpty)
-            bounds = new(0, 0, bitmap.PixelWidth, bitmap.PixelHeight);
+            throw new CaptureException("Выбранная область находится за пределами кадра. Выберите область заново.");
 
         var scale = Math.Min(1.0, LongEdge / (double)Math.Max(bounds.Width, bounds.Height));
         var width = Math.Max(1, (int)Math.Round(bounds.Width * scale));

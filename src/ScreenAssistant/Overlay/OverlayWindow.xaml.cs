@@ -95,6 +95,17 @@ public partial class OverlayWindow : Window
         base.OnClosed(e);
     }
 
+    internal void ScrollAnswer(bool down)
+    {
+        if (!Answer.IsVisible)
+            return;
+
+        if (down)
+            Answer.PageDown();
+        else
+            Answer.PageUp();
+    }
+
     private void DragHeader(object sender, MouseButtonEventArgs e)
     {
         if (e.LeftButton != MouseButtonState.Pressed)

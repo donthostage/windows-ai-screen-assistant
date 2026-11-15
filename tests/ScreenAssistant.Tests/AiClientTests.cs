@@ -321,6 +321,29 @@ public sealed class AiClientTests
         }
     }
 
+    [Fact]
+    public async Task ScrollAnalysisSendsFramesInOrderInOneRequest()
+    {
+        var calls = 0;
+        using var http = new HttpClient(new Handler(async (request, token) =>
+        {
+            calls++;
+            using var json = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+            var messages = json.RootElement.GetProperty("messages");
+            Assert.Equal(1, messages.GetArrayLength());
+            var parts = messages[0].GetProperty("content");
+            Assert.Equal(3, parts.GetArrayLength());
+            Assert.Equal("data:image/png;base64,AQID", parts[1].GetProperty("image_url").GetProperty("url").GetString());
+            Assert.Equal("data:image/jpeg;base64,BAU=", parts[2].GetProperty("image_url").GetProperty("url").GetString());
+            return Json("""{"choices":[{"message":{"content":"Готово"}}]}""");
+        }));
+
+        var result = await new AiClient(http).AnalyzeScrollAsync(Endpoint, "test", "vision",
+            [Frame, new("image/jpeg", [4, 5])], default);
+        Assert.Equal("Готово", result);
+        Assert.Equal(1, calls);
+    }
+
     private static HttpResponseMessage Json(string value) => new(HttpStatusCode.OK)
     {
         Content = new StringContent(value, Encoding.UTF8, "application/json")

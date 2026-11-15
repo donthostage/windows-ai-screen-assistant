@@ -8,7 +8,7 @@ public sealed class FrameGeometryTests
     public void ClampsNegativeCoordinates()
     {
         var result = FrameGeometry.NormalizeCrop(new CropRect(-20, -5, 100, 80), 200, 150);
-        Assert.Equal(new CropRect(0, 0, 100, 80), result);
+        Assert.Equal(new CropRect(0, 0, 80, 75), result);
     }
 
     [Fact]
@@ -24,6 +24,7 @@ public sealed class FrameGeometryTests
         Assert.Equal(default, FrameGeometry.NormalizeCrop(new CropRect(10, 10, 0, 40), 100, 100));
         Assert.Equal(default, FrameGeometry.NormalizeCrop(new CropRect(10, 10, 40, 0), 100, 100));
         Assert.Equal(default, FrameGeometry.NormalizeCrop(new CropRect(200, 10, 40, 40), 100, 100));
+        Assert.Equal(default, FrameGeometry.NormalizeCrop(new CropRect(-60, 10, 40, 40), 100, 100));
         Assert.True(default(CropRect).IsEmpty);
     }
 

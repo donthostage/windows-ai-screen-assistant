@@ -27,7 +27,7 @@ public partial class CropSelectionWindow : Window
         if (e.Key == Key.Escape)
         {
             DialogResult = false;
-            Close();
+
         }
         else if (e.Key == Key.Enter)
             FinishSelection();
@@ -73,7 +73,6 @@ public partial class CropSelectionWindow : Window
 
     private void FinishSelection()
     {
-        var dpi = System.Windows.Media.VisualTreeHelper.GetDpi(this);
         var xDip = Canvas.GetLeft(Selection);
         var yDip = Canvas.GetTop(Selection);
         var wDip = Selection.Width;
@@ -81,14 +80,16 @@ public partial class CropSelectionWindow : Window
         if (double.IsNaN(xDip) || double.IsNaN(yDip) || wDip < 40 || hDip < 40)
         {
             DialogResult = false;
-            Close();
+
             return;
         }
 
-        var left = (int)Math.Round((Left + xDip) * dpi.DpiScaleX);
-        var top = (int)Math.Round((Top + yDip) * dpi.DpiScaleY);
-        var width = (int)Math.Round(wDip * dpi.DpiScaleX);
-        var height = (int)Math.Round(hDip * dpi.DpiScaleY);
+        var topLeft = Surface.PointToScreen(new Point(xDip, yDip));
+        var bottomRight = Surface.PointToScreen(new Point(xDip + wDip, yDip + hDip));
+        var left = (int)Math.Round(topLeft.X);
+        var top = (int)Math.Round(topLeft.Y);
+        var width = (int)Math.Round(bottomRight.X) - left;
+        var height = (int)Math.Round(bottomRight.Y) - top;
         SelectedPixels = new Int32Rect(left, top, width, height);
         SelectedMonitor = MonitorFromRect(new RectPixels
         {
@@ -98,7 +99,7 @@ public partial class CropSelectionWindow : Window
             Bottom = top + height
         }, 0);
         DialogResult = true;
-        Close();
+
     }
 
     [StructLayout(LayoutKind.Sequential)]

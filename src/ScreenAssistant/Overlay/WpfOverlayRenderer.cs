@@ -57,6 +57,7 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
     {
         _mainWindow = mainWindow;
         mainWindow.BindOverlaySettings(_viewModel);
+        mainWindow.AnswerScrollRequested += down => _window?.ScrollAnswer(down);
     }
 
     public void SetEnabledPreference(bool enabled)

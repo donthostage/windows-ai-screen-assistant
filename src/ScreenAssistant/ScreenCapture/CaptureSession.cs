@@ -1,5 +1,3 @@
-using System.Reflection;
-using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using Windows.Graphics.Capture;
 using Windows.Graphics.DirectX;
@@ -12,11 +10,11 @@ namespace ScreenAssistant.ScreenCapture;
 internal sealed class CaptureSession : IAsyncDisposable
 {
     private const DirectXPixelFormat Format = DirectXPixelFormat.B8G8R8A8UIntNormalized;
-    private readonly Channel<Direct3D11CaptureFrame> _frames = Channel.CreateBounded<Direct3D11CaptureFrame>(
+    // Only queue notifications. Native frames are acquired and released by the reader.
+    private readonly Channel<byte> _frameReady = Channel.CreateBounded<byte>(
         new BoundedChannelOptions(1)
         {
             SingleReader = true,
-            SingleWriter = true,
             FullMode = BoundedChannelFullMode.DropWrite
         });
     private readonly object _gate = new();
@@ -27,7 +25,7 @@ internal sealed class CaptureSession : IAsyncDisposable
     private Windows.Graphics.SizeInt32 _size;
     private int _state; // 0 idle, 1 started, 2 disposing/disposed
 
-    public async Task StartAsync(GraphicsCaptureItem item, CancellationToken token)
+    public async Task StartAsync(GraphicsCaptureItem item, CancellationToken token, bool borderless)
     {
         token.ThrowIfCancellationRequested();
         lock (_gate)
@@ -43,7 +41,15 @@ internal sealed class CaptureSession : IAsyncDisposable
             _pool = Direct3D11CaptureFramePool.CreateFreeThreaded(_device, Format, 2, size);
             _session = _pool.CreateCaptureSession(item);
             _session.IsCursorCaptureEnabled = false;
-            TryDisableBorder(_session);
+            if (borderless && OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
+            {
+                try { _session.IsBorderRequired = false; }
+                catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or UnauthorizedAccessException)
+                {
+                    Configuration.LocalFiles.Log("capture-border", ex);
+                }
+            }
+
             _size = size;
             _pool.FrameArrived += FrameArrived;
             _session.StartCapture();
@@ -103,8 +109,7 @@ internal sealed class CaptureSession : IAsyncDisposable
         if (pool is not null)
             pool.FrameArrived -= FrameArrived;
 
-        while (_frames.Reader.TryRead(out var leftover))
-            leftover.Dispose();
+        _frameReady.Writer.TryComplete();
 
         try { session?.Dispose(); }
         catch { /* ignore teardown races */ }
@@ -125,73 +130,37 @@ internal sealed class CaptureSession : IAsyncDisposable
             if (Volatile.Read(ref _state) != 1)
                 throw new CaptureException("Сессия захвата закрыта.");
 
-            var frame = await _frames.Reader.ReadAsync(token);
+            await _frameReady.Reader.ReadAsync(token);
+            var frame = pool.TryGetNextFrame();
+            if (frame is null)
+                continue;
+
+            Windows.Graphics.SizeInt32 content;
             using (frame)
             {
-                var content = frame.ContentSize;
+                content = frame.ContentSize;
                 if (content.Width <= 0 || content.Height <= 0)
                     continue;
 
-                Windows.Graphics.SizeInt32 size;
-                lock (_gate)
-                {
-                    if (_state != 1)
-                        throw new CaptureException("Сессия захвата закрыта.");
-                    size = _size;
-                }
-
-                if (content.Width == size.Width && content.Height == size.Height)
+                if (content.Width == _size.Width && content.Height == _size.Height)
                 {
                     return await SoftwareBitmap.CreateCopyFromSurfaceAsync(
                         frame.Surface, BitmapAlphaMode.Ignore).AsTask(token);
                 }
-
-                lock (_gate)
-                {
-                    if (_state != 1 || _pool is null || _device is null)
-                        throw new CaptureException("Сессия захвата закрыта.");
-                    _size = content;
-                    _pool.Recreate(_device, Format, 2, _size);
-                }
             }
-        }
-    }
 
-    private void FrameArrived(Direct3D11CaptureFramePool sender, object args)
-    {
-        if (Volatile.Read(ref _state) != 1)
-            return;
-
-        var frame = sender.TryGetNextFrame();
-        if (frame is null)
-            return;
-
-        while (!_frames.Writer.TryWrite(frame))
-        {
-            if (_frames.Reader.TryRead(out var old))
-                old.Dispose();
-            else
+            lock (_gate)
             {
-                frame.Dispose();
-                return;
+                if (_state != 1)
+                    throw new CaptureException("Сессия захвата закрыта.");
+                pool.Recreate(device, Format, 2, content);
+                _size = content;
             }
         }
     }
 
-    private static void TryDisableBorder(GraphicsCaptureSession session)
-    {
-        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
-            return;
-
-        try
-        {
-            session.GetType().GetProperty("IsBorderRequired")?.SetValue(session, false);
-        }
-        catch (Exception ex) when (ex is COMException or NotImplementedException or InvalidCastException
-            or TargetInvocationException)
-        {
-        }
-    }
+    private void FrameArrived(Direct3D11CaptureFramePool sender, object args) =>
+        _frameReady.Writer.TryWrite(0);
 }
 
 internal static class GraphicsCapture
@@ -209,10 +178,10 @@ internal static class GraphicsCapture
     }
 
     public static async Task<CapturedImage> TakeOnceAsync(GraphicsCaptureItem item, CropRect? crop,
-        CancellationToken token)
+        CancellationToken token, bool borderless = false)
     {
         await using var session = new CaptureSession();
-        await session.StartAsync(item, token);
+        await session.StartAsync(item, token, borderless);
         return await session.TakeAsync(crop, token);
     }
 }
