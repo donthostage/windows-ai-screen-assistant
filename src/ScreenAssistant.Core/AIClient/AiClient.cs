@@ -122,15 +122,20 @@ public sealed class AiClient(HttpClient http, TimeSpan? requestTimeout = null)
                 throw CreateHttpError(response);
 
             var mediaType = response.Content.Headers.ContentType?.MediaType;
-            if (string.Equals(mediaType, "application/json", StringComparison.OrdinalIgnoreCase)
-                || mediaType?.EndsWith("+json", StringComparison.OrdinalIgnoreCase) == true)
+            if (!string.Equals(mediaType, "text/event-stream", StringComparison.OrdinalIgnoreCase))
             {
-                await response.Content.LoadIntoBufferAsync(http.MaxResponseContentBufferSize)
+                await response.Content.LoadIntoBufferAsync(32 * 1024 * 1024)
                     .WaitAsync(timeout.Token).ConfigureAwait(false);
-                await using var jsonBody = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
-                using var json = await JsonDocument.ParseAsync(jsonBody, cancellationToken: timeout.Token)
-                    .ConfigureAwait(false);
-                return ResponseParser.ReadCompletion(json.RootElement);
+                var raw = await response.Content.ReadAsStringAsync(timeout.Token).ConfigureAwait(false);
+                try
+                {
+                    using var json = JsonDocument.Parse(raw);
+                    return ResponseParser.ReadCompletion(json.RootElement);
+                }
+                catch (JsonException)
+                {
+                    return raw;
+                }
             }
 
             await using var body = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);

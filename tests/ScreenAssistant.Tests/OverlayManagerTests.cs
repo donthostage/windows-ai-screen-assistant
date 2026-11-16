@@ -61,7 +61,7 @@ public sealed class OverlayManagerTests
         await overlay.AppendAsync(canceled, "Отменённый");
         await overlay.EndAsync("Остановлено");
         await overlay.CompleteAsync(canceled, "Запоздавший");
-        Assert.Equal(new OverlayState("Остановлено", "Первый ответ", OverlayPhase.Idle), renderer.State);
+        Assert.Equal(new OverlayState("Остановлено", "", OverlayPhase.Idle), renderer.State);
     }
 
     [Fact]
@@ -101,6 +101,7 @@ public sealed class OverlayManagerTests
         Assert.Equal(new[] { true, false }, renderer.Visibility);
         await hide.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.Equal(new[] { true, false, true }, renderer.Visibility);
+        Assert.True(renderer.ExclusionRefreshCount >= 1);
     }
 
     [Fact]
@@ -123,14 +124,24 @@ public sealed class OverlayManagerTests
     {
         var renderer = new Renderer();
         var overlay = new OverlayManager(new InlineDispatcher(), renderer);
-        await overlay.SetClickThroughAsync(true);
-        Assert.Equal(new[] { true }, renderer.ClickThrough);
-        await overlay.SetVisibleAsync(true);
-        Assert.Equal(new[] { true, true }, renderer.ClickThrough);
         await overlay.SetClickThroughAsync(false);
-        Assert.Equal(new[] { true, true, false }, renderer.ClickThrough);
+        Assert.Equal(new[] { false }, renderer.ClickThrough);
+        await overlay.SetVisibleAsync(true);
+        Assert.Equal(new[] { false }, renderer.ClickThrough);
+        await overlay.SetClickThroughAsync(true);
+        Assert.Equal(new[] { false, true }, renderer.ClickThrough);
         await overlay.ShutdownAsync();
-        Assert.Equal(new[] { true, true, false, false }, renderer.ClickThrough);
+        Assert.Equal(new[] { false, true, false }, renderer.ClickThrough);
+    }
+
+    [Fact]
+    public async Task EnsureExcludedFalseWhenRendererReportsIncluded()
+    {
+        var renderer = new Renderer { Excluded = false };
+        var overlay = new OverlayManager(new InlineDispatcher(), renderer);
+        await overlay.SetVisibleAsync(true);
+        Assert.False(await overlay.EnsureExcludedAsync());
+        Assert.True(renderer.ExclusionRefreshCount >= 1);
     }
 
     private sealed class InlineDispatcher : IOverlayDispatcher
@@ -147,8 +158,12 @@ public sealed class OverlayManagerTests
         public List<bool> Visibility { get; } = [];
         public List<bool> ClickThrough { get; } = [];
         public OverlayState? State { get; private set; }
+        public bool Excluded { get; set; } = true;
+        public int ExclusionRefreshCount { get; private set; }
+        public bool IsExcludedFromCapture => Excluded;
         public void Render(OverlayState state) => State = state;
         public void SetVisible(bool visible) => Visibility.Add(visible);
         public void SetClickThrough(bool enabled) => ClickThrough.Add(enabled);
+        public void RefreshCaptureExclusion() => ExclusionRefreshCount++;
     }
 }

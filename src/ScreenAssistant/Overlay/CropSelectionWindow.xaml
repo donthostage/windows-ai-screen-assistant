@@ -5,11 +5,16 @@
         Background="#33000000" Topmost="True" ShowInTaskbar="False"
         ResizeMode="NoResize" WindowStartupLocation="Manual"
         Cursor="Cross" KeyDown="Window_KeyDown">
-    <Canvas x:Name="Surface" Background="Transparent"
-            MouseLeftButtonDown="Surface_MouseLeftButtonDown"
-            MouseMove="Surface_MouseMove"
-            MouseLeftButtonUp="Surface_MouseLeftButtonUp">
-        <Border x:Name="Selection" BorderBrush="#4DA3FF" BorderThickness="1"
-                Background="#224DA3FF" Visibility="Collapsed"/>
-    </Canvas>
+    <Grid>
+        <Canvas x:Name="Surface" Background="Transparent"
+                MouseLeftButtonDown="Surface_MouseLeftButtonDown"
+                MouseMove="Surface_MouseMove"
+                MouseLeftButtonUp="Surface_MouseLeftButtonUp">
+            <Border x:Name="Selection" BorderBrush="#4DA3FF" BorderThickness="1"
+                    Background="#224DA3FF" Visibility="Collapsed"/>
+        </Canvas>
+        <TextBlock x:Name="HintText" Text="Выделите область. Esc — отмена."
+                   HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,24,0,0"
+                   Foreground="White" FontSize="14" IsHitTestVisible="False"/>
+    </Grid>
 </Window>

@@ -124,16 +124,24 @@ internal sealed class CaptureSession : IAsyncDisposable
     private async Task<SoftwareBitmap> CopyFrameAsync(
         Direct3D11CaptureFramePool pool, IDirect3DDevice device, CancellationToken token)
     {
+        var started = System.Diagnostics.Stopwatch.StartNew();
         while (true)
         {
             token.ThrowIfCancellationRequested();
             if (Volatile.Read(ref _state) != 1)
                 throw new CaptureException("Сессия захвата закрыта.");
+            if (started.Elapsed >= TimeSpan.FromSeconds(10))
+                throw new CaptureException("Кадр не получен за 10 секунд. Проверьте источник захвата.");
 
-            await _frameReady.Reader.ReadAsync(token);
+            // Сигнал от FrameArrived вспомогательный; кадр читаем опросом пула.
+            _ = _frameReady.Reader.TryRead(out _);
+
             var frame = pool.TryGetNextFrame();
             if (frame is null)
+            {
+                await Task.Delay(50, token);
                 continue;
+            }
 
             Windows.Graphics.SizeInt32 content;
             using (frame)

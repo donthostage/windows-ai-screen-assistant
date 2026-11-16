@@ -7,24 +7,31 @@ public readonly record struct CropRect(int X, int Y, int Width, int Height)
 
 public static class FrameGeometry
 {
+    private const long MaxStoredPixels = 64L * 1024 * 1024;
+
     /// <summary>
-    /// Clamps a crop to the frame. Empty / non-positive crops become default.
-    /// Callers must pass the real bitmap size — do not invent dimensions.
+    /// Clamps a crop to the frame. Returns null for empty / miss / non-positive.
     /// </summary>
-    public static CropRect NormalizeCrop(CropRect crop, int width, int height)
+    public static CropRect? NormalizeOrNull(CropRect crop, int width, int height)
     {
         if (width <= 0 || height <= 0 || crop.Width <= 0 || crop.Height <= 0)
-            return default;
+            return null;
 
         var x = Math.Clamp(crop.X, 0, width);
         var y = Math.Clamp(crop.Y, 0, height);
         var w = Math.Min((long)crop.X + crop.Width, width) - x;
         var h = Math.Min((long)crop.Y + crop.Height, height) - y;
         if (w <= 0 || h <= 0)
-            return default;
+            return null;
 
         return new(x, y, (int)w, (int)h);
     }
+
+    /// <summary>
+    /// Clamps a crop to the frame. Empty / non-positive crops become default.
+    /// </summary>
+    public static CropRect NormalizeCrop(CropRect crop, int width, int height) =>
+        NormalizeOrNull(crop, width, height) ?? default;
 
     /// <summary>
     /// Reads a persisted crop without clamping to a frame. Returns null if incomplete.
@@ -32,6 +39,8 @@ public static class FrameGeometry
     public static CropRect? TryReadStored(int? x, int? y, int? width, int? height)
     {
         if (x is null || y is null || width is not > 0 || height is not > 0)
+            return null;
+        if ((long)width.Value * height.Value > MaxStoredPixels)
             return null;
         return new(x.Value, y.Value, width.Value, height.Value);
     }

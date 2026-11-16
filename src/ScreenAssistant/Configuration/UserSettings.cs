@@ -28,9 +28,16 @@ internal sealed record UserSettings
         var stored = GetStoredCrop();
         if (stored is null)
             return null;
-        var normalized = FrameGeometry.NormalizeCrop(stored.Value, frameWidth, frameHeight);
-        return normalized.IsEmpty ? null : normalized;
+        return FrameGeometry.NormalizeOrNull(stored.Value, frameWidth, frameHeight);
     }
+
+    public UserSettings WithCrop(CropRect? crop) => this with
+    {
+        CropX = crop?.X,
+        CropY = crop?.Y,
+        CropWidth = crop?.Width,
+        CropHeight = crop?.Height
+    };
 
     public static UserSettings Load()
     {
@@ -68,7 +75,8 @@ internal static class KeyStore
         var path = KeyPath(endpoint);
         if (value.Length == 0)
         {
-            File.Delete(path);
+            if (File.Exists(path))
+                File.Delete(path);
             return;
         }
 
@@ -103,7 +111,11 @@ internal static class LocalFiles
             File.WriteAllBytes(temp, contents);
             File.Move(temp, path, overwrite: true);
         }
-        finally { File.Delete(temp); }
+        finally
+        {
+            if (File.Exists(temp))
+                File.Delete(temp);
+        }
     }
 
     public static void Log(string operation, Exception ex)

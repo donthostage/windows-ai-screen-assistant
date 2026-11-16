@@ -2,6 +2,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using ScreenAssistant.Configuration;
 using ScreenAssistant.Core.AIClient;
 using ScreenAssistant.Core.Geometry;
 using Windows.Graphics.Imaging;
@@ -15,7 +16,8 @@ internal sealed record CapturedImage(ImagePayload Payload, string Fingerprint, i
 
 internal static class FrameEncoding
 {
-    private const int LongEdge = 2560;
+    private const int LongEdgeCropped = 2560;
+    private const int LongEdgeFull = 3000;
     private const int PngLimit = 8 * 1024 * 1024;
 
     public static Task<CapturedImage> EncodeAsync(SoftwareBitmap bitmap, CancellationToken token) =>
@@ -24,13 +26,32 @@ internal static class FrameEncoding
     public static async Task<CapturedImage> EncodeAsync(SoftwareBitmap bitmap, CropRect? crop,
         CancellationToken token)
     {
-        var bounds = crop is { } requested && !requested.IsEmpty
-            ? FrameGeometry.NormalizeCrop(requested, bitmap.PixelWidth, bitmap.PixelHeight)
-            : new CropRect(0, 0, bitmap.PixelWidth, bitmap.PixelHeight);
-        if (bounds.IsEmpty)
-            throw new CaptureException("Выбранная область находится за пределами кадра. Выберите область заново.");
+        CropRect bounds;
+        var longEdge = LongEdgeFull;
+        if (crop is { } requested && !requested.IsEmpty)
+        {
+            var normalized = FrameGeometry.NormalizeOrNull(requested, bitmap.PixelWidth, bitmap.PixelHeight);
+            if (normalized is null)
+            {
+                LocalFiles.Log("frame-crop",
+                    new CaptureException("Выбранная область находится за пределами кадра. Выберите область заново."));
+                bounds = new CropRect(0, 0, bitmap.PixelWidth, bitmap.PixelHeight);
+            }
+            else
+            {
+                bounds = normalized.Value;
+                longEdge = LongEdgeCropped;
+            }
+        }
+        else
+        {
+            bounds = new CropRect(0, 0, bitmap.PixelWidth, bitmap.PixelHeight);
+        }
 
-        var scale = Math.Min(1.0, LongEdge / (double)Math.Max(bounds.Width, bounds.Height));
+        if (bounds.IsEmpty)
+            bounds = new CropRect(0, 0, Math.Max(1, bitmap.PixelWidth), Math.Max(1, bitmap.PixelHeight));
+
+        var scale = Math.Min(1.0, longEdge / (double)Math.Max(bounds.Width, bounds.Height));
         var width = Math.Max(1, (int)Math.Round(bounds.Width * scale));
         var height = Math.Max(1, (int)Math.Round(bounds.Height * scale));
 
@@ -78,27 +99,28 @@ internal static class FrameEncoding
         var left = RandomNumberGenerator.GetInt32(palette.Length);
         var middle = (left + RandomNumberGenerator.GetInt32(1, 3)) % palette.Length;
         var right = (middle + RandomNumberGenerator.GetInt32(1, 3)) % palette.Length;
-        var bands = new[] { palette[left], palette[middle], palette[right] };
+        var expected = $"{palette[left].Item1},{palette[middle].Item1},{palette[right].Item1}";
 
-        const int bandWidth = 64;
-        const int width = bandWidth * 3;
-        const int height = 96;
-        const int stride = width * 3;
-        var pixels = new byte[height * stride];
-        for (var y = 0; y < height; y++)
-        for (var x = 0; x < width; x++)
-        {
-            var (_, channel) = bands[x / bandWidth];
-            pixels[y * stride + x * 3 + channel] = 255;
-        }
-
-        var bitmap = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgr24, null, pixels, stride);
+        var pixels = new byte[48];
+        WriteBand(pixels, 0, palette[left].Item2);
+        WriteBand(pixels, 1, palette[middle].Item2);
+        WriteBand(pixels, 2, palette[right].Item2);
+        var source = BitmapSource.Create(12, 1, 96, 96, PixelFormats.Bgra32, null, pixels, 48);
         var encoder = new PngBitmapEncoder();
-        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        encoder.Frames.Add(BitmapFrame.Create(source));
         using var output = new MemoryStream();
         encoder.Save(output);
-        var colors = string.Join(" ", bands.Select(band => band.Item1));
-        return (new ImagePayload("image/png", output.ToArray()), colors);
+        return (new ImagePayload("image/png", output.ToArray()), expected);
+
+        static void WriteBand(byte[] buffer, int band, int channel)
+        {
+            for (var x = band * 4; x < band * 4 + 4; x++)
+            {
+                var i = x * 4;
+                buffer[i + channel] = 255;
+                buffer[i + 3] = 255;
+            }
+        }
     }
 
     private static ImagePayload ToJpeg(byte[] png)

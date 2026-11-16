@@ -1,5 +1,7 @@
 using System.Net.Http;
 using System.Windows;
+using System.Windows.Threading;
+using ScreenAssistant.Configuration;
 using ScreenAssistant.Core.AIClient;
 using ScreenAssistant.Core.Overlay;
 using ScreenAssistant.Overlay;
@@ -11,12 +13,28 @@ public partial class App : Application
     private readonly HttpClient _http = new(new HttpClientHandler { AllowAutoRedirect = false })
     {
         Timeout = Timeout.InfiniteTimeSpan,
-        MaxResponseContentBufferSize = 16 * 1024 * 1024
+        MaxResponseContentBufferSize = 32 * 1024 * 1024
     };
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        DispatcherUnhandledException += (_, args) =>
+        {
+            LocalFiles.Log("dispatcher", args.Exception);
+            args.Handled = true;
+        };
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            LocalFiles.Log("unobserved-task", args.Exception);
+            args.SetObserved();
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+        {
+            if (args.ExceptionObject is Exception ex)
+                LocalFiles.Log("appdomain", ex);
+        };
+
         var preferences = OverlayPreferences.Load();
         var renderer = new WpfOverlayRenderer(preferences, settings => settings.Save());
         var overlay = new OverlayManager(new WpfOverlayDispatcher(Dispatcher), renderer);
@@ -31,7 +49,6 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
-        // MainWindow awaits overlay shutdown and cancels in-flight work before Close completes.
         _http.Dispose();
         base.OnExit(e);
     }

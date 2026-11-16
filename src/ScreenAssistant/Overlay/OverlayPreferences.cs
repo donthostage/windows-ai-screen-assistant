@@ -10,7 +10,7 @@ internal sealed record OverlayPreferences
     public bool Enabled { get; init; }
     public bool Compact { get; init; } = true;
     public bool ExcludeFromCapture { get; init; } = true;
-    public bool SolidBackground { get; init; }
+    public bool SolidBackground { get; init; } = true;
     public double CompactHeight { get; init; } = 38;
     public double Width { get; init; } = DefaultWidth();
     public double Height { get; init; } = 180;

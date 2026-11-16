@@ -8,7 +8,7 @@ public sealed class OverlayManager(IOverlayDispatcher dispatcher, IOverlayRender
     private long _request;
     private bool _active;
     private bool _visible;
-    private bool _clickThrough;
+    private bool _clickThrough = true;
     private bool _closed;
     private int _hideGeneration;
     private bool _hideShouldRestore;
@@ -36,6 +36,23 @@ public sealed class OverlayManager(IOverlayDispatcher dispatcher, IOverlayRender
         _clickThrough = enabled;
         renderer.SetClickThrough(enabled);
     });
+
+    public async Task<bool> EnsureExcludedAsync()
+    {
+        var result = true;
+        await dispatcher.InvokeAsync(() =>
+        {
+            if (_closed || !_visible)
+            {
+                result = true;
+                return;
+            }
+
+            renderer.RefreshCaptureExclusion();
+            result = renderer.IsExcludedFromCapture;
+        }).ConfigureAwait(false);
+        return result;
+    }
 
     public async Task<long> BeginAsync(string status, bool reset = false)
     {
@@ -91,6 +108,7 @@ public sealed class OverlayManager(IOverlayDispatcher dispatcher, IOverlayRender
         if (_closed)
             return;
 
+        _lastAnswer = "";
         Finish(status, error);
     });
 
@@ -119,16 +137,22 @@ public sealed class OverlayManager(IOverlayDispatcher dispatcher, IOverlayRender
             return;
         }
 
+        if (_closed || generation != Volatile.Read(ref _hideGeneration))
+            return;
+
+        var shouldRestore = false;
         await dispatcher.InvokeAsync(() =>
         {
-            if (_closed || generation != Volatile.Read(ref _hideGeneration) || !_hideShouldRestore || _visible)
-                return;
-
-            _hideShouldRestore = false;
-            renderer.Render(_state);
-            renderer.SetVisible(true);
-            _visible = true;
+            shouldRestore = !_closed && generation == Volatile.Read(ref _hideGeneration) && _hideShouldRestore;
+            if (shouldRestore)
+                _hideShouldRestore = false;
         }).ConfigureAwait(false);
+
+        if (!shouldRestore)
+            return;
+
+        await SetVisibleAsync(true).ConfigureAwait(false);
+        await EnsureExcludedAsync().ConfigureAwait(false);
     }
 
     public Task ShutdownAsync() => dispatcher.InvokeAsync(() =>

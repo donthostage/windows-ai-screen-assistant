@@ -32,15 +32,16 @@ public partial class OverlayWindow : Window
     {
         _viewModel = viewModel;
         _mainWindow = mainWindow;
-        if (viewModel.Preferences.SolidBackground)
-        {
-            AllowsTransparency = false;
-            Background = new SolidColorBrush(Color.FromRgb(0x28, 0x28, 0x28));
-        }
-        else
+        // Непрозрачный путь по умолчанию; прозрачность только при SolidBackground == false.
+        if (viewModel.Preferences.SolidBackground == false)
         {
             AllowsTransparency = true;
             Background = Brushes.Transparent;
+        }
+        else
+        {
+            AllowsTransparency = false;
+            Background = new SolidColorBrush(Color.FromRgb(0x28, 0x28, 0x28));
         }
 
         InitializeComponent();
@@ -59,7 +60,6 @@ public partial class OverlayWindow : Window
         _source?.AddHook(WindowMessage);
         ApplyExtendedStyles();
         ApplyExclusion();
-        Place(_viewModel.Preferences.X, _viewModel.Preferences.Y);
         Dispatcher.InvokeAsync(() => Place(_viewModel.Preferences.X, _viewModel.Preferences.Y),
             DispatcherPriority.Loaded);
     }
@@ -155,12 +155,23 @@ public partial class OverlayWindow : Window
         if (e.LeftButton != MouseButtonState.Pressed)
             return;
 
-        DragMove();
-        if (GetWindowRect(_hwnd, out var rect))
+        var restoreClickThrough = _clickThrough;
+        try
         {
-            Place(rect.Left, rect.Top, MonitorFromWindow(_hwnd, MonitorDefaultToNearest));
-            if (GetWindowRect(_hwnd, out var placed))
-                _viewModel.SetPosition(placed.Left, placed.Top);
+            if (restoreClickThrough)
+                SetClickThrough(false);
+            DragMove();
+            if (GetWindowRect(_hwnd, out var rect))
+            {
+                Place(rect.Left, rect.Top, MonitorFromWindow(_hwnd, MonitorDefaultToNearest));
+                if (GetWindowRect(_hwnd, out var placed))
+                    _viewModel.SetPosition(placed.Left, placed.Top);
+            }
+        }
+        finally
+        {
+            if (restoreClickThrough)
+                SetClickThrough(true);
         }
     }
 
@@ -183,7 +194,7 @@ public partial class OverlayWindow : Window
         if (e.PropertyName is nameof(OverlayViewModel.Width) or nameof(OverlayViewModel.DisplayHeight))
             KeepOnScreen();
         else if (e.PropertyName == nameof(OverlayViewModel.Preferences))
-            Place(null, null);
+            KeepOnScreen();
         else if (e.PropertyName == nameof(OverlayViewModel.ExcludeFromCapture))
             ApplyExclusion();
     }

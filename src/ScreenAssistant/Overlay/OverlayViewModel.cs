@@ -14,8 +14,10 @@ internal sealed class OverlayViewModel(OverlayPreferences preferences) : INotify
     public string Status => _state.Status;
     public string Text => _state.Text;
     public bool HasError => _state.Phase == OverlayPhase.Error;
+
     public string CompactText => HasError || _state.Phase == OverlayPhase.Loading || string.IsNullOrWhiteSpace(Text)
-        ? Status : string.Join(" · ", Text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        ? Status
+        : string.Join(" · ", Text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
     public double DisplayHeight => Compact ? CompactHeight : Height;
     public bool UsesHorizontalLayout => Compact || DisplayHeight <= 64;
     public double CompactFontSize => Math.Clamp(DisplayHeight - 14, 1, FontSize);
@@ -84,18 +86,33 @@ internal sealed class OverlayViewModel(OverlayPreferences preferences) : INotify
         }
     }
 
-    public Thickness TextInset => new(PanelOpacity < .85 ? 24 : 0, 0, 0, 0);
+    // 0.85 → 9px, 1.0 → 14px; ниже 0.85 — без inset.
+    public Thickness TextInset
+    {
+        get
+        {
+            if (PanelOpacity < .85)
+                return new(24, 0, 0, 0);
+            var t = (PanelOpacity - .85) / .15;
+            var inset = 9 + t * 5;
+            return new(inset, 0, 0, 0);
+        }
+    }
 
     public Brush HeaderBackground
     {
         get
         {
-            const double minimumOpacity = .65;
-            if (PanelOpacity == 0 || PanelOpacity >= minimumOpacity)
+            if (PanelOpacity <= 0)
                 return Brushes.Transparent;
 
-            // The header is layered over the panel fill. Keep their combined opacity at 65%.
-            var alpha = (byte)Math.Ceiling(255 * (minimumOpacity - PanelOpacity) / (1 - PanelOpacity));
+            // Плавный alpha без разрыва на 0.65: добираем до ~65% суммарной непрозрачности.
+            const double target = .65;
+            if (PanelOpacity >= target)
+                return Brushes.Transparent;
+
+            var alpha = (byte)Math.Clamp(
+                Math.Ceiling(255 * (target - PanelOpacity) / Math.Max(1e-6, 1 - PanelOpacity)), 0, 255);
             var brush = new SolidColorBrush(Color.FromArgb(alpha, 0x28, 0x28, 0x28));
             brush.Freeze();
             return brush;
@@ -119,7 +136,7 @@ internal sealed class OverlayViewModel(OverlayPreferences preferences) : INotify
 
     public void Render(OverlayState state)
     {
-        if (_state == state)
+        if (_state.Phase == state.Phase && _state.Text == state.Text && _state.Status == state.Status)
             return;
 
         var previous = _state;

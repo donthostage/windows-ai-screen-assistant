@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Windows AI Screen Assistant" Language="ru-RU"
         Width="1040" Height="760" MinWidth="700" MinHeight="530"
-        Background="#F4F6F9" Foreground="#19253B"
+        Background="#F4F6F9" Foreground="#19253B" ShowInTaskbar="False"
         FontFamily="Segoe UI" FontSize="14" UseLayoutRounding="True">
     <Window.Resources>
         <SolidColorBrush x:Key="Line" Color="#D8DFE8"/>
@@ -95,7 +95,7 @@
             </Border>
             <CheckBox x:Name="OverlayEnabled" DockPanel.Dock="Right" Content="Плавающий ответ"
                       VerticalAlignment="Center" Margin="8,0,12,0"
-                      ToolTip="Ответ поверх окон. Окно старается исключиться из захвата; если не удалось — перенесите на другой монитор."
+                      ToolTip="Ответ поверх окон. Окно старается исключиться из захвата; если не удалось — включите плотный фон или перенесите на другой монитор."
                       Checked="OverlayToggle_Changed" Unchecked="OverlayToggle_Changed"/>
             <TextBlock Text="AI Screen Assistant" FontSize="27" FontWeight="SemiBold"/>
         </DockPanel>
@@ -112,7 +112,11 @@
                         <TextBlock Style="{StaticResource Section}" Text="Источник"/>
                         <TextBlock x:Name="SourceText" Style="{StaticResource Hint}"
                                    Text="Выберите монитор в системном окне." Margin="0,5,0,9"/>
-                        <Button x:Name="PickButton" Content="Выбрать источник захвата…" Click="Pick_Click" Margin="0,0,0,8"/>
+                        <UniformGrid Columns="2" Margin="0,0,0,8">
+                            <Button x:Name="PickButton" Content="Выбрать…" Click="Pick_Click" Margin="0,0,4,0"/>
+                            <Button x:Name="CropButton" Content="Область…" Click="Crop_Click" Margin="4,0,0,0"
+                                    IsEnabled="{Binding IsEnabled, ElementName=PickButton}"/>
+                        </UniformGrid>
                         <Button x:Name="BorderlessButton" Content="Запросить захват без рамки"
                                 Click="Borderless_Click" Margin="0,0,0,10"
                                 IsEnabled="{Binding IsEnabled, ElementName=PickButton}"/>
@@ -121,7 +125,12 @@
                             <Label Target="{Binding ElementName=BaseUrl}" Content="Base URL"/>
                             <TextBox x:Name="BaseUrl" TextChanged="BaseUrl_Changed" Margin="0,0,0,7"/>
                             <Label Target="{Binding ElementName=ApiKey}" Content="API-ключ"/>
-                            <PasswordBox x:Name="ApiKey" Margin="0,0,0,7"/>
+                            <DockPanel Margin="0,0,0,7">
+                                <Button DockPanel.Dock="Right" x:Name="ShowKeyButton" Content="показать"
+                                        Click="ShowKey_Click" Margin="6,0,0,0" Padding="8,4" MinHeight="28"/>
+                                <PasswordBox x:Name="ApiKey"/>
+                                <TextBox x:Name="ApiKeyPlain" Visibility="Collapsed"/>
+                            </DockPanel>
                             <Label Target="{Binding ElementName=ModelId}" Content="Модель"/>
                             <DockPanel Margin="0,0,0,9">
                                 <Button DockPanel.Dock="Right" Content="Каталог" Click="Catalog_Click" Margin="6,0,0,0"
@@ -130,7 +139,9 @@
                                           AutomationProperties.Name="ID модели" VerticalContentAlignment="Center"/>
                             </DockPanel>
                             <Label Target="{Binding ElementName=PeriodicInterval}" Content="Интервал анализа, с"/>
-                            <TextBox x:Name="PeriodicInterval" Text="30" Margin="0,0,0,8"/>
+                            <TextBox x:Name="PeriodicInterval" Text="30" Margin="0,0,0,8"
+                                     PreviewTextInput="PeriodicInterval_PreviewTextInput"
+                                     LostFocus="PeriodicInterval_LostFocus"/>
                             <Button Content="Сохранить настройки" Click="Save_Click"/>
                         </StackPanel>
                         <TextBlock Style="{StaticResource Hint}" Margin="0,10,0,0"
@@ -283,7 +294,7 @@
                                AutomationProperties.LiveSetting="Polite"/>
                     <TextBlock x:Name="StatsText" Style="{StaticResource Hint}" Margin="0,2,0,0"/>
                     <TextBlock Style="{StaticResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap"
-                               Text="Трей у часов. Крестик — в трей. Выход — из меню иконки. Хоткеи: Ctrl+Alt+M окно · Ctrl+Alt+H оверлей · Ctrl+Alt+L длинная страница · Ctrl+Alt+J/K листать · Ctrl+Alt+U автопрокрутка"/>
+                               Text="Трей у часов. Крестик — в трей. Выход — из меню иконки. Хоткеи: Ctrl+Alt+M окно · Ctrl+Alt+H оверлей · Ctrl+Alt+L длинная страница · Ctrl+Alt+J/K прокрутка · Ctrl+Alt+U автопрокрутка · Ctrl+Alt+Пробел остановка"/>
                 </StackPanel>
             </DockPanel>
         </Border>

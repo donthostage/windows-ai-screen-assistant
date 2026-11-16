@@ -1,13 +1,17 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
-using System.Windows.Threading;
 using ScreenAssistant.Configuration;
 using ScreenAssistant.Core.AIClient;
+using ScreenAssistant.Core.Geometry;
 using ScreenAssistant.Core.Overlay;
+using ScreenAssistant.Core.Scheduler;
 using ScreenAssistant.Hotkeys;
 using ScreenAssistant.Overlay;
 using ScreenAssistant.ScreenCapture;
@@ -21,6 +25,9 @@ public partial class MainWindow : Window
     private static readonly Brush Idle = Brushes.SlateGray;
     private static readonly Brush Active = Brushes.SeaGreen;
     private static readonly Brush Error = Brushes.Firebrick;
+    private const int GwlExstyle = -20;
+    private const int WsExAppWindow = 0x00040000;
+    private const int WsExToolWindow = 0x00000080;
 
     private readonly AiClient _ai;
     private readonly IOverlayService _overlay;
@@ -31,10 +38,11 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _operation;
     private TaskCompletionSource? _operationFinished;
     private long _requestVersion;
-    private readonly DispatcherTimer _periodicTimer = new();
+    private AnalysisScheduler? _scheduler;
+    private CancellationTokenSource? _periodicCts;
+    private CaptureSession? _periodicCapture;
     private PeriodicAnalysis? _periodic;
     private string? _lastAnalyzedFrame;
-    private TimeSpan _retryDelay;
     private HotkeyManager? _hotkeys;
     private AppTrayIcon? _tray;
     private HwndSource? _hwndSource;
@@ -45,6 +53,7 @@ public partial class MainWindow : Window
     private bool _shutdownComplete;
     private bool _sourceLost;
     private bool _operationUsesSource;
+    private bool _keyVisible;
     private int _requests;
     private int _answers;
 
@@ -55,7 +64,6 @@ public partial class MainWindow : Window
         _overlay = overlay;
         _persistOverlayEnabled = persistOverlayEnabled;
         InitializeComponent();
-        _periodicTimer.Tick += async (_, _) => await AnalyzePeriodicFrameAsync();
         ShowInTaskbar = false;
         HistoryList.ItemsSource = _history;
         OverlayEnabled.IsChecked = overlayEnabled;
@@ -66,8 +74,9 @@ public partial class MainWindow : Window
         };
         Loaded += async (_, _) =>
         {
-            _tray = new AppTrayIcon(ShowFromTray, RequestExit);
+            _tray ??= new AppTrayIcon(ShowFromTray, RequestExit, StopFromTray);
             await ApplyOverlayVisibilityAsync();
+            HideToTray();
         };
         _initialized = true;
         try
@@ -88,14 +97,14 @@ public partial class MainWindow : Window
         UpdateStats();
     }
 
-    internal event Action<bool>? AnswerScrollRequested;
     internal event Action? AnswerAutoscrollToggled;
+    private CropRect? _nextCrop;
+    internal event Action<bool>? AnswerScrollRequested;
 
     internal void BindOverlaySettings(OverlayViewModel model) => OverlayOptions.DataContext = model;
 
     internal void WarnOverlayCaptureInclusion() =>
-        Status("Плавающее окно не удалось исключить из захвата. Включите плотный фон или перенесите окно.",
-            error: true);
+        Status("Оверлей виден в записи. Включите плотный фон", error: true);
 
     private void ResetOverlayPosition_Click(object sender, RoutedEventArgs e)
     {
@@ -109,6 +118,9 @@ public partial class MainWindow : Window
     {
         base.OnSourceInitialized(e);
         var hwnd = new WindowInteropHelper(this).Handle;
+        var style = GetWindowLong(hwnd, GwlExstyle);
+        style = (style | WsExToolWindow) & ~WsExAppWindow;
+        SetWindowLong(hwnd, GwlExstyle, style);
         _hwndSource = HwndSource.FromHwnd(hwnd);
         _hwndSource?.AddHook(WndProc);
         _hotkeys = new HotkeyManager(hwnd, id => _ = OnHotkeyAsync(id));
@@ -150,11 +162,19 @@ public partial class MainWindow : Window
                 case AppHotkeys.AnswerPageDown:
                     await OnUiAsync(() => AnswerScrollRequested?.Invoke(id == AppHotkeys.AnswerPageDown));
                     break;
+                case AppHotkeys.ShowWindow:
+                    await OnUiAsync(ShowFromTray);
+                    break;
                 case AppHotkeys.ToggleAnswerAutoscroll:
                     await OnUiAsync(() => AnswerAutoscrollToggled?.Invoke());
                     break;
-                case AppHotkeys.ShowWindow:
-                    await OnUiAsync(ShowFromTray);
+                case AppHotkeys.Panic:
+                    _requestVersion++;
+                    _operation?.Cancel();
+                    _periodicCts?.Cancel();
+                    try { await _overlay.HideForAsync(TimeSpan.FromSeconds(3)); }
+                    catch (Exception ex) { LocalFiles.Log("panic-hide", ex); }
+                    await OnUiAsync(() => Status("Паника: оверлей скрыт, текущий запрос отменён."));
                     break;
             }
         }
@@ -178,6 +198,8 @@ public partial class MainWindow : Window
         {
             await _overlay.SetVisibleAsync(enabled);
             _persistOverlayEnabled(enabled);
+            if (enabled && !await _overlay.EnsureExcludedAsync())
+                await OnUiAsync(() => Status("Оверлей виден в записи. Включите плотный фон", error: true));
         }
         catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
         {
@@ -201,15 +223,59 @@ public partial class MainWindow : Window
 
         _keyEndpoint = endpoint;
         ApiKey.Clear();
+        ApiKeyPlain.Text = "";
         if (endpoint is null)
             return;
 
-        try { ApiKey.Password = KeyStore.Read(endpoint); }
+        try
+        {
+            var key = KeyStore.Read(endpoint);
+            ApiKey.Password = key;
+            ApiKeyPlain.Text = key;
+        }
         catch (Exception ex)
         {
             LocalFiles.Log("key-load", ex);
             Status("Ключ не удалось прочитать. Введите его заново.", error: true);
         }
+    }
+
+    private void ShowKey_Click(object sender, RoutedEventArgs e)
+    {
+        _keyVisible = !_keyVisible;
+        if (_keyVisible)
+        {
+            ApiKeyPlain.Text = ApiKey.Password;
+            ApiKey.Visibility = Visibility.Collapsed;
+            ApiKeyPlain.Visibility = Visibility.Visible;
+            ShowKeyButton.Content = "скрыть";
+        }
+        else
+        {
+            ApiKey.Password = ApiKeyPlain.Text;
+            ApiKeyPlain.Visibility = Visibility.Collapsed;
+            ApiKey.Visibility = Visibility.Visible;
+            ShowKeyButton.Content = "показать";
+        }
+    }
+
+    private string CurrentApiKey() =>
+        _keyVisible ? ApiKeyPlain.Text.Trim() : ApiKey.Password.Trim();
+
+    private void PeriodicInterval_PreviewTextInput(object sender, TextCompositionEventArgs e) =>
+        e.Handled = !Regex.IsMatch(e.Text, "^[0-9]+$");
+
+    private void PeriodicInterval_LostFocus(object sender, RoutedEventArgs e)
+    {
+        if (!int.TryParse(PeriodicInterval.Text, out var seconds))
+        {
+            PeriodicInterval.BorderBrush = Error;
+            return;
+        }
+
+        seconds = Math.Clamp(seconds, 5, 3600);
+        PeriodicInterval.Text = seconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        PeriodicInterval.ClearValue(BorderBrushProperty);
     }
 
     private async void Pick_Click(object sender, RoutedEventArgs e) =>
@@ -233,7 +299,37 @@ public partial class MainWindow : Window
                 ClearPreview();
                 Status("Источник выбран.");
             });
+
         });
+
+    private void Crop_Click(object sender, RoutedEventArgs e)
+    {
+        if (_source is null)
+        {
+            Status("Сначала выберите источник захвата.", error: true);
+            return;
+        }
+
+        SelectNextCrop();
+    }
+
+    private void SelectNextCrop()
+    {
+        var picker = new CropSelectionWindow();
+        if (picker.ShowDialog() != true)
+            return;
+
+        var relative = MonitorGeometry.ToMonitorRelative(picker.SelectedPixels, picker.SelectedMonitor);
+        if (relative.IsEmpty)
+        {
+            Status("Слишком маленькая область", error: true);
+            return;
+        }
+
+        _nextCrop = relative;
+        FrameDetails.Text = $"область {relative.Width} × {relative.Height} · {relative.X}, {relative.Y}";
+        Status("Область выбрана для следующего кадра.");
+    }
 
     private async void Borderless_Click(object sender, RoutedEventArgs e)
     {
@@ -262,7 +358,7 @@ public partial class MainWindow : Window
                 Status(_borderlessCapture ? "Windows разрешила захват без рамки."
                     : "Windows не разрешила захват без рамки.", error: !_borderlessCapture);
             }
-            catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or UnauthorizedAccessException or InvalidOperationException)
+            catch (Exception ex) when (ex is COMException or UnauthorizedAccessException or InvalidOperationException)
             {
                 LocalFiles.Log("borderless-consent", ex);
                 Status("Для захвата без рамки запустите установленную MSIX-версию.", error: true);
@@ -293,7 +389,7 @@ public partial class MainWindow : Window
             return;
         try
         {
-            KeyStore.Save(endpoint, ApiKey.Password.Trim());
+            KeyStore.Save(endpoint, CurrentApiKey());
             settings.Save();
             Status("Настройки сохранены.");
         }
@@ -335,11 +431,11 @@ public partial class MainWindow : Window
 
     private async void StartPeriodic_Click(object sender, RoutedEventArgs e)
     {
-        if (_operation is not null || _periodic is not null || _source is not { } source
+        if (_operation is not null || _periodic is not null || _scheduler is not null || _source is not { } source
             || !ReadSettings(out var settings, out var endpoint))
             return;
 
-        var key = ApiKey.Password.Trim();
+        var key = CurrentApiKey();
         if (key.Length == 0 || string.IsNullOrWhiteSpace(settings.Model))
         {
             Status("Выберите модель и введите ключ.", error: true);
@@ -347,44 +443,161 @@ public partial class MainWindow : Window
         }
         if (!int.TryParse(PeriodicInterval.Text, out var seconds) || seconds is < 5 or > 3600)
         {
+            PeriodicInterval.BorderBrush = Error;
             Status("Интервал должен быть от 5 до 3600 секунд.", error: true);
             return;
         }
 
-        _periodic = new(source, endpoint, key, settings.Model, TimeSpan.FromSeconds(seconds));
+        try
+        {
+            KeyStore.Save(endpoint, key);
+            settings.Save();
+        }
+        catch (Exception ex)
+        {
+            LocalFiles.Log("settings-autosave", ex);
+        }
+
+        var session = new PeriodicAnalysis(source, endpoint, key, settings.Model,
+            TimeSpan.FromSeconds(seconds), TimeSpan.FromMinutes(settings.DurationMinutes));
         _lastAnalyzedFrame = null;
-        await AnalyzePeriodicFrameAsync();
+        _periodic = session;
+        _scheduler = new AnalysisScheduler();
+        _periodicCts = new CancellationTokenSource();
+        var token = _periodicCts.Token;
+        UpdateControls();
+        var capture = new CaptureSession();
+        try
+        {
+            await capture.StartAsync(source, token, _borderlessCapture);
+            token.ThrowIfCancellationRequested();
+        }
+        catch (Exception ex)
+        {
+            await capture.DisposeAsync();
+            if (ReferenceEquals(_periodic, session))
+            {
+                StopPeriodic();
+                UpdateControls();
+                if (ex is not OperationCanceledException)
+                {
+                    LocalFiles.Log("periodic-start", ex);
+                    Status("Не удалось запустить захват экрана.", error: true);
+                }
+            }
+            return;
+        }
+        _periodicCapture = capture;
+        UpdateControls();
+        Status("Периодический анализ запущен.");
+        _ = RunPeriodicLoopAsync(session, token);
     }
 
-    private async Task AnalyzePeriodicFrameAsync()
+    private async Task RunPeriodicLoopAsync(PeriodicAnalysis session, CancellationToken token)
     {
-        _periodicTimer.Stop();
-        if (_periodic is not { } session || _operation is not null || _closing || _shutdownComplete)
-            return;
-
-        await RunOperationAsync("periodic", async token =>
+        var scheduler = _scheduler!;
+        try
         {
-            Status("Периодический анализ · получаем кадр…");
-            var frame = await CaptureAsync(session.Source, token);
-            if (frame.Fingerprint == _lastAnalyzedFrame)
+            var end = await scheduler.RunAsync(session.Interval, session.Duration,
+                ct => OnUiAsync(() => RunPeriodicOperationAsync(session, ct)).Unwrap(), token);
+            await OnUiAsync(() =>
             {
-                Status("Кадр не изменился. Ждём следующий снимок.");
-                return;
-            }
+                if (!ReferenceEquals(_scheduler, scheduler))
+                    return;
+                if (end == SessionEnd.DurationElapsed)
+                    Status("Время тренировки истекло.");
+                else if (!_closing)
+                    Status("Тренировка остановлена.");
+            });
+        }
+        catch (Exception ex)
+        {
+            LocalFiles.Log("periodic-loop", ex);
+            await OnUiAsync(() =>
+            {
+                if (ReferenceEquals(_scheduler, scheduler))
+                    Status("Периодический анализ завершился ошибкой.", error: true);
+            });
+        }
+        finally
+        {
+            await OnUiAsync(() =>
+            {
+                if (ReferenceEquals(_scheduler, scheduler))
+                    StopPeriodic();
+                UpdateControls();
+            });
+        }
+    }
 
+    private async Task<TimeSpan?> RunPeriodicOperationAsync(PeriodicAnalysis session, CancellationToken token)
+    {
+        if (token.IsCancellationRequested || !ReferenceEquals(_periodic, session))
+            return null;
+
+        TimeSpan? retryAfter = null;
+        await RunOperationAsync("periodic", async operationToken =>
+        {
+            retryAfter = await AnalyzePeriodicFrameAsync(session, operationToken);
+        }, usesSource: true, sessionToken: token);
+        return retryAfter;
+    }
+
+    private async Task<TimeSpan?> AnalyzePeriodicFrameAsync(PeriodicAnalysis session, CancellationToken token)
+    {
+        if (_closing || _shutdownComplete)
+            return null;
+
+        await OnUiAsync(() => Status("Периодический анализ · получаем кадр…"));
+        var frame = await CaptureAsync(session.Source, token);
+        if (frame.Fingerprint == _lastAnalyzedFrame)
+        {
+            await OnUiAsync(() => Status("Кадр не изменился. Ждём следующий снимок."));
+            return null;
+        }
+
+        await OnUiAsync(() =>
+        {
             _requests++;
             UpdateStats();
             Status("Периодический анализ · ждём ответ…");
+        });
+
+        try
+        {
             await ShowAnalysisAsync(session.Model,
                 ct => _ai.AnalyzeAsync(session.Endpoint, session.Key, session.Model, frame.Payload, ct),
                 frame.Fingerprint, "Ответ готов. Периодический анализ продолжается.", token);
-        }, usesSource: true);
+            return null;
+        }
+        catch (AiException ex)
+        {
+            await OnUiAsync(() => Status(ex.Message, error: true));
+            if (ex.RequiresConfigurationChange)
+            {
+                await OnUiAsync(StopPeriodic);
+                throw;
+            }
+
+            return ex.RetryAfter;
+        }
     }
 
     private async Task ShowAnalysisAsync(string model, Func<CancellationToken, Task<string>> analyze,
         string? lastFrame, string status, CancellationToken token)
     {
-        var requestId = await _overlay.BeginAsync("Анализируем изображение…");
+        long requestId;
+        try
+        {
+            requestId = await _overlay.BeginAsync("Анализируем изображение…");
+        }
+        catch (InvalidOperationException ex)
+        {
+            LocalFiles.Log("overlay-begin", ex);
+            await OnUiAsync(() => Status("Оверлей закрыт. Включите плавающий ответ.", error: true));
+            throw;
+        }
+
         try
         {
             var result = MathText.Format(await analyze(token));
@@ -392,8 +605,11 @@ public partial class MainWindow : Window
             await _overlay.CompleteAsync(requestId, result);
             token.ThrowIfCancellationRequested();
             _lastAnalyzedFrame = lastFrame;
-            AddAnswer(model, result, selectAnswerTab: false);
-            Status(status);
+            await OnUiAsync(() =>
+            {
+                AddAnswer(model, result, selectAnswerTab: false);
+                Status(status);
+            });
         }
         catch (AiException ex)
         {
@@ -407,23 +623,29 @@ public partial class MainWindow : Window
         }
     }
 
-    private void SchedulePeriodicFrame()
-    {
-        _periodicTimer.Stop();
-        if (_periodic is not { } session || _operation is not null || _closing || _shutdownComplete)
-            return;
-
-        var delay = _retryDelay > session.Interval ? _retryDelay : session.Interval;
-        _periodicTimer.Interval = TimeSpan.FromMilliseconds(Math.Min(delay.TotalMilliseconds, int.MaxValue));
-        _periodicTimer.Start();
-    }
-
     private void StopPeriodic()
     {
-        _periodicTimer.Stop();
+        try { _periodicCts?.Cancel(); }
+        catch { /* ignore */ }
+        _periodicCts?.Dispose();
+        _periodicCts = null;
+        _scheduler = null;
         _periodic = null;
-        _retryDelay = TimeSpan.Zero;
+        if (_periodicCapture is { } capture)
+        {
+            _periodicCapture = null;
+            _ = capture.DisposeAsync().AsTask();
+        }
     }
+
+    private void StopFromTray() => Dispatcher.Invoke(() =>
+    {
+        _requestVersion++;
+        StopPeriodic();
+        _operation?.Cancel();
+        Status(_operation is null ? "Анализ остановлен." : "Останавливаем операцию…");
+        UpdateControls();
+    });
 
     private async Task AnalyzeScrollAsync()
     {
@@ -440,7 +662,7 @@ public partial class MainWindow : Window
             ShowFromTray();
             return;
         }
-        var key = ApiKey.Password.Trim();
+        var key = CurrentApiKey();
         if (key.Length == 0 || string.IsNullOrWhiteSpace(settings.Model))
         {
             ShowFromTray();
@@ -504,7 +726,18 @@ public partial class MainWindow : Window
         });
         try
         {
-            var image = await GraphicsCapture.TakeOnceAsync(source, null, token, _borderlessCapture);
+            CropRect? crop = null;
+            await OnUiAsync(() =>
+            {
+                token.ThrowIfCancellationRequested();
+                crop = _nextCrop;
+                _nextCrop = null;
+            });
+            CapturedImage image;
+            if (_periodicCapture is { } capture)
+                image = await capture.TakeAsync(crop, token);
+            else
+                image = await GraphicsCapture.TakeOnceAsync(source, crop, token, _borderlessCapture);
 
             token.ThrowIfCancellationRequested();
             await OnUiAsync(() =>
@@ -526,15 +759,12 @@ public partial class MainWindow : Window
     }
 
     private async Task RunOperationAsync(string name, Func<CancellationToken, Task> action,
-        bool usesSource = false)
+        bool usesSource = false, CancellationToken sessionToken = default)
     {
         if (_operation is not null || _closing || _shutdownComplete)
             return;
 
-        _periodicTimer.Stop();
-        if (name == "periodic")
-            _retryDelay = TimeSpan.Zero;
-        using var cancellation = new CancellationTokenSource();
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(sessionToken);
         var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _operationFinished = finished;
         _operation = cancellation;
@@ -565,18 +795,13 @@ public partial class MainWindow : Window
         }
         catch (AiException ex)
         {
-            if (name == "periodic" && ex.RequiresConfigurationChange)
-                StopPeriodic();
-            else if (ex.RetryAfter is { } delay && delay > _retryDelay)
-                _retryDelay = delay;
             LocalFiles.Log(name, ex);
             await ReportErrorAsync(ex.Message);
         }
         catch (Exception ex)
         {
             LocalFiles.Log(name, ex);
-            const string message = "Операция завершилась ошибкой. Подробности в журнале.";
-            await ReportErrorAsync(message);
+            await ReportErrorAsync("Операция завершилась ошибкой. Подробности в журнале.");
         }
         finally
         {
@@ -584,11 +809,7 @@ public partial class MainWindow : Window
             _operationFinished = null;
             try
             {
-                await OnUiAsync(() =>
-                {
-                    UpdateControls();
-                    SchedulePeriodicFrame();
-                });
+                await OnUiAsync(UpdateControls);
                 if (_closing)
                     await FinishCloseAsync();
             }
@@ -634,6 +855,7 @@ public partial class MainWindow : Window
         if (_source is { } source)
             source.Closed -= Source_Closed;
         _source = null;
+        _nextCrop = null;
     }
 
     private void History_Changed(object sender, SelectionChangedEventArgs e)
@@ -653,12 +875,13 @@ public partial class MainWindow : Window
             return false;
         }
         endpoint = parsed!;
-        settings = new UserSettings
+        var loaded = UserSettings.Load();
+        settings = loaded with
         {
             BaseUrl = endpoint.AbsoluteUri.TrimEnd('/'),
             Model = ModelId.Text.Trim(),
             IntervalSeconds = int.TryParse(PeriodicInterval.Text, out var interval) && interval is >= 5 and <= 3600
-                ? interval : 30
+                ? interval : loaded.IntervalSeconds
         };
         return true;
     }
@@ -666,11 +889,12 @@ public partial class MainWindow : Window
     private void UpdateControls()
     {
         var idle = _operation is null;
-        PickButton.IsEnabled = idle && _periodic is null;
+        var periodicIdle = _periodic is null && _scheduler is null;
+        PickButton.IsEnabled = idle && periodicIdle;
+        CropButton.IsEnabled = idle && periodicIdle && _source is not null;
         SettingsPanel.IsEnabled = idle;
-        StartPeriodicButton.IsEnabled = idle && _periodic is null && _source is not null;
-
-        StopButton.IsEnabled = _periodic is not null || _operation is { IsCancellationRequested: false };
+        StartPeriodicButton.IsEnabled = idle && periodicIdle && _source is not null;
+        StopButton.IsEnabled = !periodicIdle || _operation is { IsCancellationRequested: false };
     }
 
     private void UpdateStats() =>
@@ -690,7 +914,7 @@ public partial class MainWindow : Window
             return Task.CompletedTask;
         }
 
-        return Dispatcher.InvokeAsync(action, DispatcherPriority.Normal).Task;
+        return Dispatcher.InvokeAsync(action).Task;
     }
 
     private Task<T> OnUiAsync<T>(Func<T> action)
@@ -698,7 +922,7 @@ public partial class MainWindow : Window
         if (Dispatcher.CheckAccess())
             return Task.FromResult(action());
 
-        return Dispatcher.InvokeAsync(action, DispatcherPriority.Normal).Task;
+        return Dispatcher.InvokeAsync(action).Task;
     }
 
     private void HideToTray()
@@ -775,13 +999,25 @@ public partial class MainWindow : Window
         catch (Exception ex) { LocalFiles.Log("overlay-shutdown", ex); }
 
         _shutdownComplete = true;
-        await OnUiAsync(Close);
+        await OnUiAsync(() =>
+        {
+            Close();
+            Application.Current.Shutdown();
+        });
     }
 
-    private sealed record PeriodicAnalysis(GraphicsCaptureItem Source, Uri Endpoint, string Key, string Model, TimeSpan Interval);
+    private sealed record PeriodicAnalysis(
+        GraphicsCaptureItem Source, Uri Endpoint, string Key, string Model,
+        TimeSpan Interval, TimeSpan Duration);
 
     private sealed record HistoryEntry(DateTimeOffset Time, string Model, string Text)
     {
         public string Label => $"{Time:HH:mm:ss}   {Model}";
     }
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+    private static extern int GetWindowLong(nint hwnd, int index);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongW")]
+    private static extern int SetWindowLong(nint hwnd, int index, int value);
 }

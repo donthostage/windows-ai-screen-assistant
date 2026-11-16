@@ -8,6 +8,7 @@ internal static class AppHotkeys
     public const int AnswerPageUp = 8;
     public const int AnswerPageDown = 9;
     public const int ToggleAnswerAutoscroll = 10;
+    public const int Panic = 5;
 
     public static readonly (int Id, uint Modifiers, uint Vk, string Label)[] Defaults =
     [
@@ -16,6 +17,7 @@ internal static class AppHotkeys
         (Scroll, HotkeyManager.ModControl | HotkeyManager.ModAlt, 0x4C, "Ctrl+Alt+L"),
         (AnswerPageUp, HotkeyManager.ModControl | HotkeyManager.ModAlt, 0x4B, "Ctrl+Alt+K"),
         (AnswerPageDown, HotkeyManager.ModControl | HotkeyManager.ModAlt, 0x4A, "Ctrl+Alt+J"),
-        (ToggleAnswerAutoscroll, HotkeyManager.ModControl | HotkeyManager.ModAlt, 0x55, "Ctrl+Alt+U")
+        (ToggleAnswerAutoscroll, HotkeyManager.ModControl | HotkeyManager.ModAlt, 0x55, "Ctrl+Alt+U"),
+        (Panic, HotkeyManager.ModControl | HotkeyManager.ModAlt, 0x20, "Ctrl+Alt+Пробел")
     ];
 }

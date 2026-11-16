@@ -8,6 +8,7 @@ public interface IOverlayService
 {
     Task SetVisibleAsync(bool visible);
     Task SetClickThroughAsync(bool enabled);
+    Task<bool> EnsureExcludedAsync();
     Task<long> BeginAsync(string status, bool reset = false);
     Task AppendAsync(long requestId, string delta);
     Task CompleteAsync(long requestId, string text);
@@ -22,6 +23,8 @@ public interface IOverlayRenderer
     void Render(OverlayState state);
     void SetVisible(bool visible);
     void SetClickThrough(bool enabled);
+    void RefreshCaptureExclusion();
+    bool IsExcludedFromCapture { get; }
 }
 
 public interface IOverlayDispatcher

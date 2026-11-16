@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Windows;
 using System.Windows.Forms;
 using ScreenAssistant.Configuration;
 
@@ -8,7 +9,7 @@ internal sealed class AppTrayIcon : IDisposable
 {
     private readonly NotifyIcon _icon;
 
-    public AppTrayIcon(Action showWindow, Action exitApp)
+    public AppTrayIcon(Action showWindow, Action exitApp, Action stopAnalysis)
     {
         Icon? icon = null;
         try
@@ -28,12 +29,28 @@ internal sealed class AppTrayIcon : IDisposable
             Icon = icon ?? SystemIcons.Application,
             Visible = true
         };
-        _icon.DoubleClick += (_, _) => showWindow();
+
+        void Marshal(Action action)
+        {
+            var dispatcher = System.Windows.Application.Current?.Dispatcher;
+            if (dispatcher is null || dispatcher.CheckAccess())
+                action();
+            else
+                dispatcher.Invoke(action);
+        }
+
+        _icon.Click += (_, e) =>
+        {
+            if (e is MouseEventArgs { Button: MouseButtons.Left })
+                Marshal(showWindow);
+        };
+        _icon.DoubleClick += (_, _) => Marshal(showWindow);
 
         var menu = new ContextMenuStrip();
-        menu.Items.Add("Открыть окно", null, (_, _) => showWindow());
+        menu.Items.Add("Открыть окно", null, (_, _) => Marshal(showWindow));
+        menu.Items.Add("Остановить анализ", null, (_, _) => Marshal(stopAnalysis));
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Выход", null, (_, _) => exitApp());
+        menu.Items.Add("Выход", null, (_, _) => Marshal(exitApp));
         _icon.ContextMenuStrip = menu;
     }
 

@@ -28,16 +28,19 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
     private Window? _mainWindow;
     private bool _dirty;
     private bool _solidBackground;
-    private bool _clickThrough;
+    private bool _clickThrough = true;
+    private bool _exclusionRecoveryTried;
+    private OverlayPreferences? _lastSaved;
 
     public WpfOverlayRenderer(OverlayPreferences preferences, Action<OverlayPreferences> save)
     {
         _viewModel = new OverlayViewModel(preferences);
         _solidBackground = preferences.SolidBackground;
+        _lastSaved = preferences;
         _save = save;
         _saveTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
-            Interval = TimeSpan.FromMilliseconds(400)
+            Interval = TimeSpan.FromMilliseconds(800)
         };
         _saveTimer.Tick += (_, _) => Flush();
         _viewModel.PreferencesChanged += (_, _) =>
@@ -53,12 +56,14 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
     public event EventHandler? CloseRequested;
     public event EventHandler? CaptureExclusionFailed;
 
+    public bool IsExcludedFromCapture => _window is null || _window.IsExcludedFromCapture;
+
     public void Attach(MainWindow mainWindow)
     {
         _mainWindow = mainWindow;
         mainWindow.BindOverlaySettings(_viewModel);
-        mainWindow.AnswerScrollRequested += down => _window?.ScrollAnswer(down);
         mainWindow.AnswerAutoscrollToggled += () => _window?.ToggleAnswerAutoscroll();
+        mainWindow.AnswerScrollRequested += down => _window?.ScrollAnswer(down);
     }
 
     public void SetEnabledPreference(bool enabled)
@@ -74,6 +79,8 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
         _clickThrough = enabled;
         _window?.SetClickThrough(enabled);
     }
+
+    public void RefreshCaptureExclusion() => _window?.ApplyExclusion();
 
     public void SetVisible(bool visible)
     {
@@ -92,8 +99,31 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
 
     private void RecreateVisibleWindow()
     {
-        CloseWindow();
-        OpenWindow();
+        try
+        {
+            CloseWindow();
+            OpenWindow();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
+        {
+            LocalFiles.Log("overlay-recreate", ex);
+            if (_viewModel.Preferences.SolidBackground)
+            {
+                _viewModel.SolidBackground = false;
+                try
+                {
+                    CloseWindow();
+                    OpenWindow();
+                }
+                catch (Exception retry) when (retry is InvalidOperationException or Win32Exception)
+                {
+                    LocalFiles.Log("overlay-recreate-retry", retry);
+                    throw;
+                }
+            }
+            else
+                throw;
+        }
     }
 
     private void OpenWindow()
@@ -108,7 +138,14 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
             if (_clickThrough)
                 window.SetClickThrough(true);
             if (_viewModel.Preferences.ExcludeFromCapture && !window.IsExcludedFromCapture)
+            {
                 CaptureExclusionFailed?.Invoke(this, EventArgs.Empty);
+                if (!_exclusionRecoveryTried)
+                {
+                    _exclusionRecoveryTried = true;
+                    _viewModel.SolidBackground = true;
+                }
+            }
         }
         catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
         {
@@ -125,6 +162,7 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
             return;
 
         _window = null;
+        _exclusionRecoveryTried = false;
         current.Closed -= UserClosed;
         current.Close();
     }
@@ -135,9 +173,17 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
         if (!_dirty)
             return;
 
+        var next = _viewModel.Preferences;
+        if (_lastSaved == next)
+        {
+            _dirty = false;
+            return;
+        }
+
         try
         {
-            _save(_viewModel.Preferences);
+            _save(next);
+            _lastSaved = next;
             _dirty = false;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -152,6 +198,7 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
             window.Closed -= UserClosed;
 
         _window = null;
+        _exclusionRecoveryTried = false;
         CloseRequested?.Invoke(this, EventArgs.Empty);
     }
 }
