@@ -13,6 +13,7 @@ using ScreenAssistant.Core.Geometry;
 using ScreenAssistant.Core.Overlay;
 using ScreenAssistant.Core.Scheduler;
 using ScreenAssistant.Hotkeys;
+using ScreenAssistant.Licensing;
 using ScreenAssistant.Overlay;
 using ScreenAssistant.ScreenCapture;
 using ScreenAssistant.Tray;
@@ -30,10 +31,13 @@ public partial class MainWindow : Window
     private const int WsExToolWindow = 0x00000080;
 
     private readonly AiClient _ai;
+    private readonly Core.Licensing.ActivationClient _activation;
     private readonly IOverlayService _overlay;
     private readonly Action<bool> _persistOverlayEnabled;
     private readonly ObservableCollection<HistoryEntry> _history = new();
     private GraphicsCaptureItem? _source;
+    private string? _approvedCaptureDestination;
+    private bool _confirmingCapture;
     private Uri? _keyEndpoint;
     private CancellationTokenSource? _operation;
     private TaskCompletionSource? _operationFinished;
@@ -57,10 +61,11 @@ public partial class MainWindow : Window
     private int _requests;
     private int _answers;
 
-    internal MainWindow(AiClient ai, IOverlayService overlay,
+    internal MainWindow(AiClient ai, Core.Licensing.ActivationClient activation, IOverlayService overlay,
         bool overlayEnabled, Action<bool> persistOverlayEnabled)
     {
         _ai = ai;
+        _activation = activation;
         _overlay = overlay;
         _persistOverlayEnabled = persistOverlayEnabled;
         InitializeComponent();
@@ -429,36 +434,65 @@ public partial class MainWindow : Window
         HistoryList.SelectedIndex = 0;
     }
 
+    private void ActivateLicense_Click(object sender, RoutedEventArgs e) =>
+        new Licensing.ActivationWindow(_activation) { Owner = this }.ShowDialog();
+
     private async void StartPeriodic_Click(object sender, RoutedEventArgs e)
     {
-        if (_operation is not null || _periodic is not null || _scheduler is not null || _source is not { } source
-            || !ReadSettings(out var settings, out var endpoint))
+        if (_operation is not null || _periodic is not null || _scheduler is not null || _source is not { } source)
             return;
-
-        var key = CurrentApiKey();
-        if (key.Length == 0 || string.IsNullOrWhiteSpace(settings.Model))
-        {
-            Status("Выберите модель и введите ключ.", error: true);
-            return;
-        }
         if (!int.TryParse(PeriodicInterval.Text, out var seconds) || seconds is < 5 or > 3600)
         {
             PeriodicInterval.BorderBrush = Error;
             Status("Интервал должен быть от 5 до 3600 секунд.", error: true);
             return;
         }
+        if (!TryLoadLicense(out var license))
+            return;
 
-        try
+        string model;
+        Func<ImagePayload, CancellationToken, Task<string>> analyze;
+        UserSettings settings;
+        if (license is not null)
         {
-            KeyStore.Save(endpoint, key);
-            settings.Save();
+            var server = new Uri(license.Server);
+            if (!ConfirmCaptureDestination(source, server, licensed: true))
+                return;
+
+            settings = UserSettings.Load();
+            model = "Сервер лицензий";
+            analyze = (image, token) => RunLicensedAnalysisAsync(license, key =>
+                _activation.AnalyzeAsync(server, license.LicenseId,
+                    Guid.NewGuid(), key, image, token));
         }
-        catch (Exception ex)
+        else
         {
-            LocalFiles.Log("settings-autosave", ex);
+            if (!ReadSettings(out settings, out var endpoint))
+                return;
+
+            var key = CurrentApiKey();
+            model = settings.Model;
+            if (key.Length == 0 || string.IsNullOrWhiteSpace(model))
+            {
+                Status("Выберите модель и введите ключ.", error: true);
+                return;
+            }
+            if (!ConfirmCaptureDestination(source, endpoint, licensed: false))
+                return;
+
+            analyze = (image, token) => _ai.AnalyzeAsync(endpoint, key, model, image, token);
+            try
+            {
+                KeyStore.Save(endpoint, key);
+                settings.Save();
+            }
+            catch (Exception ex)
+            {
+                LocalFiles.Log("settings-autosave", ex);
+            }
         }
 
-        var session = new PeriodicAnalysis(source, endpoint, key, settings.Model,
+        var session = new PeriodicAnalysis(source, model, analyze,
             TimeSpan.FromSeconds(seconds), TimeSpan.FromMinutes(settings.DurationMinutes));
         _lastAnalyzedFrame = null;
         _periodic = session;
@@ -566,7 +600,7 @@ public partial class MainWindow : Window
         try
         {
             await ShowAnalysisAsync(session.Model,
-                ct => _ai.AnalyzeAsync(session.Endpoint, session.Key, session.Model, frame.Payload, ct),
+                ct => session.Analyze(frame.Payload, ct),
                 frame.Fingerprint, "Ответ готов. Периодический анализ продолжается.", token);
             return null;
         }
@@ -657,17 +691,40 @@ public partial class MainWindow : Window
             Status("Сначала выберите источник захвата.", error: true);
             return;
         }
-        if (!ReadSettings(out var settings, out var endpoint))
-        {
-            ShowFromTray();
+        if (!TryLoadLicense(out var license))
             return;
+        string model;
+        Func<IReadOnlyList<ImagePayload>, CancellationToken, Task<string>> analyze;
+        if (license is not null)
+        {
+            var server = new Uri(license.Server);
+            if (!ConfirmCaptureDestination(source, server, licensed: true))
+                return;
+
+            model = "Сервер лицензий";
+            analyze = (frames, token) => RunLicensedAnalysisAsync(license, key =>
+                _activation.AnalyzeSeriesAsync(server, license.LicenseId,
+                    Guid.NewGuid(), key, frames, token));
         }
-        var key = CurrentApiKey();
-        if (key.Length == 0 || string.IsNullOrWhiteSpace(settings.Model))
+        else
         {
-            ShowFromTray();
-            Status("Выберите модель и введите ключ.", error: true);
-            return;
+            if (!ReadSettings(out var settings, out var endpoint))
+            {
+                ShowFromTray();
+                return;
+            }
+            var key = CurrentApiKey();
+            model = settings.Model;
+            if (key.Length == 0 || string.IsNullOrWhiteSpace(model))
+            {
+                ShowFromTray();
+                Status("Выберите модель и введите ключ.", error: true);
+                return;
+            }
+            if (!ConfirmCaptureDestination(source, endpoint, licensed: false))
+                return;
+
+            analyze = (frames, token) => _ai.AnalyzeScrollAsync(endpoint, key, model, frames, token);
         }
 
         if (!await ReplaceOperationAsync())
@@ -711,8 +768,8 @@ public partial class MainWindow : Window
                 UpdateStats();
                 Status($"Анализируем: кадров {frames.Count}…");
             });
-            await ShowAnalysisAsync(settings.Model,
-                ct => Task.Run(() => _ai.AnalyzeScrollAsync(endpoint, key, settings.Model, frames, ct), ct),
+            await ShowAnalysisAsync(model,
+                ct => Task.Run(() => analyze(frames, ct), ct),
                 lastFrame, $"Ответ по серии готов · кадров {frames.Count}.", token);
         }, usesSource: true);
     }
@@ -850,11 +907,45 @@ public partial class MainWindow : Window
         FrameDetails.Text = "";
     }
 
+    private bool ConfirmCaptureDestination(GraphicsCaptureItem source, Uri destination, bool licensed)
+    {
+        if (_confirmingCapture || _closing || _shutdownComplete || !ReferenceEquals(_source, source))
+            return false;
+
+        var approval = (licensed ? "licensed " : "direct ") + destination.AbsoluteUri;
+        if (_approvedCaptureDestination == approval)
+            return true;
+
+        _confirmingCapture = true;
+        try
+        {
+            var route = licensed ? "Сервер передаёт кадры в AI Tunnel для анализа." : "Кадры отправляются напрямую в API.";
+            var message = $"Источник захвата · {source.DisplayName}\n"
+                + $"Получатель · {destination.AbsoluteUri}\n\n"
+                + $"{route} На кадрах может быть видно всё содержимое выбранного источника. "
+                + "Остановка в приложении прекращает отправку новых кадров.\n\n"
+                + "Разрешить отправку кадров для анализа?";
+            ShowFromTray();
+            if (MessageBox.Show(this, message, "Передача кадров", MessageBoxButton.YesNo,
+                MessageBoxImage.Information, MessageBoxResult.No) != MessageBoxResult.Yes
+                || _closing || _shutdownComplete || !ReferenceEquals(_source, source))
+                return false;
+
+            _approvedCaptureDestination = approval;
+            return true;
+        }
+        finally
+        {
+            _confirmingCapture = false;
+        }
+    }
+
     private void DetachSource()
     {
         if (_source is { } source)
             source.Closed -= Source_Closed;
         _source = null;
+        _approvedCaptureDestination = null;
         _nextCrop = null;
     }
 
@@ -862,6 +953,38 @@ public partial class MainWindow : Window
     {
         HistoryText.Text = (HistoryList.SelectedItem as HistoryEntry)?.Text ?? "";
         HistoryScroll.ScrollToTop();
+    }
+
+    private static async Task<string> RunLicensedAnalysisAsync(LicenseReceipt license,
+        Func<System.Security.Cryptography.ECDsa, Task<string>> analyze)
+    {
+        try
+        {
+            using var key = WindowsDeviceKey.OpenOrCreate(license.HardwareBacked);
+            return await analyze(key);
+        }
+        catch (System.Security.Cryptography.CryptographicException ex)
+        {
+            LocalFiles.Log("license-device-key", ex);
+            throw new AiException("Не удалось открыть ключ устройства.", System.Net.HttpStatusCode.Unauthorized);
+        }
+    }
+
+    private bool TryLoadLicense(out LicenseReceipt? license)
+    {
+        try
+        {
+            license = LicenseReceipt.Load();
+            return true;
+        }
+        catch (Exception ex) when (ex is System.IO.IOException or System.IO.InvalidDataException or UnauthorizedAccessException
+            or System.Text.Json.JsonException)
+        {
+            LocalFiles.Log("license-read", ex);
+            Status("Не удалось прочитать лицензию. Обратитесь к оператору.", error: true);
+            license = null;
+            return false;
+        }
     }
 
     private bool ReadSettings(out UserSettings settings, out Uri endpoint)
@@ -1007,7 +1130,7 @@ public partial class MainWindow : Window
     }
 
     private sealed record PeriodicAnalysis(
-        GraphicsCaptureItem Source, Uri Endpoint, string Key, string Model,
+        GraphicsCaptureItem Source, string Model, Func<ImagePayload, CancellationToken, Task<string>> Analyze,
         TimeSpan Interval, TimeSpan Duration);
 
     private sealed record HistoryEntry(DateTimeOffset Time, string Model, string Text)

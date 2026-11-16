@@ -23,6 +23,7 @@ public sealed class AiClient(HttpClient http, TimeSpan? requestTimeout = null)
 {
     public const string DefaultBaseUrl = "https://api.aitunnel.ru/v1";
     private static readonly Uri CatalogUrl = new("https://api.aitunnel.ru/public/aitunnel/models/chat");
+    private const int MaxJsonResponseBytes = 4 * 1024 * 1024;
     private readonly TimeSpan _timeout = requestTimeout ?? TimeSpan.FromSeconds(60);
 
     public static bool TryParseBaseUrl(string value, out Uri? baseUri)
@@ -211,13 +212,26 @@ public sealed class AiClient(HttpClient http, TimeSpan? requestTimeout = null)
         timeout.CancelAfter(_timeout);
         try
         {
-            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseContentRead,
+            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead,
                 timeout.Token);
             if (!response.IsSuccessStatusCode)
                 throw CreateHttpError(response);
 
             await using var body = await response.Content.ReadAsStreamAsync(timeout.Token);
-            return await JsonDocument.ParseAsync(body, cancellationToken: timeout.Token);
+            using var buffer = new MemoryStream();
+            var chunk = new byte[16 * 1024];
+            while (true)
+            {
+                var count = await body.ReadAsync(chunk, timeout.Token).ConfigureAwait(false);
+                if (count == 0)
+                    break;
+                if (buffer.Length + count > MaxJsonResponseBytes)
+                    throw new AiException("Ответ API превысил допустимый размер.");
+
+                buffer.Write(chunk, 0, count);
+            }
+
+            return JsonDocument.Parse(buffer.GetBuffer().AsMemory(0, (int)buffer.Length));
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         {

@@ -143,9 +143,10 @@
                                      PreviewTextInput="PeriodicInterval_PreviewTextInput"
                                      LostFocus="PeriodicInterval_LostFocus"/>
                             <Button Content="Сохранить настройки" Click="Save_Click"/>
+                            <Button Content="Активировать лицензию…" Click="ActivateLicense_Click" Margin="0,7,0,0"/>
                         </StackPanel>
                         <TextBlock Style="{StaticResource Hint}" Margin="0,10,0,0"
-                                   Text="Выберите источник и запустите анализ. Для длинной страницы нажмите Ctrl+Alt+L. Запросы отправляются на указанный Base URL."/>
+                                   Text="Выберите источник и запустите анализ. Для длинной страницы нажмите Ctrl+Alt+L. Перед первой отправкой подтвердите источник и получателя кадров."/>
                     </StackPanel>
                 </ScrollViewer>
             </Border>

@@ -38,7 +38,8 @@ public partial class App : Application
         var preferences = OverlayPreferences.Load();
         var renderer = new WpfOverlayRenderer(preferences, settings => settings.Save());
         var overlay = new OverlayManager(new WpfOverlayDispatcher(Dispatcher), renderer);
-        var main = new MainWindow(new AiClient(_http), overlay,
+        var main = new MainWindow(new AiClient(_http),
+            new ScreenAssistant.Core.Licensing.ActivationClient(_http), overlay,
             preferences.Enabled, renderer.SetEnabledPreference);
         renderer.Attach(main);
         renderer.CloseRequested += (_, _) => main.DisableOverlay();

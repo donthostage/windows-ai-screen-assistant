@@ -344,6 +344,46 @@ public sealed class AiClientTests
         Assert.Equal(1, calls);
     }
 
+    [Fact]
+    public async Task CompletionRejectsOversizedResponseWithoutContentLength()
+    {
+        using var http = new HttpClient(new Handler((_, _) => Task.FromResult(
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new GatedStream(
+                    new string(' ', 4 * 1024 * 1024 + 1), "", Task.CompletedTask))
+            })));
+
+        var error = await Assert.ThrowsAsync<AiException>(() =>
+            new AiClient(http).AnalyzeAsync(Endpoint, "test", "vision", Frame, default));
+
+        Assert.Contains("превысил допустимый размер", error.Message);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task StreamingRejectsOversizedLineOrTotalStream(bool manySmallLines)
+    {
+        var body = manySmallLines
+            ? string.Concat(Enumerable.Repeat(": keepalive\r\n", 330_000))
+            : ":" + new string('x', 512 * 1024);
+        using var http = new HttpClient(new Handler((_, _) => Task.FromResult(
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new GatedStream(body, "", Task.CompletedTask))
+                {
+                    Headers = { ContentType = new("text/event-stream") }
+                }
+            })));
+
+        var error = await Assert.ThrowsAsync<AiException>(() =>
+            new AiClient(http).AnalyzeStreamingAsync(Endpoint, "test", "vision", Frame,
+                _ => Task.CompletedTask, default));
+
+        Assert.Contains(manySmallLines ? "Поток API превысил" : "Строка потока API превысила", error.Message);
+    }
+
     private static HttpResponseMessage Json(string value) => new(HttpStatusCode.OK)
     {
         Content = new StringContent(value, Encoding.UTF8, "application/json")

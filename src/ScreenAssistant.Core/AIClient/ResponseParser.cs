@@ -7,6 +7,8 @@ namespace ScreenAssistant.Core.AIClient;
 internal static class ResponseParser
 {
     private const int MaxAnswerLength = 64 * 1024;
+    private const int MaxEventLength = 512 * 1024;
+    private const int MaxStreamLength = 4 * 1024 * 1024;
 
     public static string ReadCompletion(JsonElement root)
     {
@@ -25,6 +27,51 @@ internal static class ResponseParser
         CancellationToken token)
     {
         using var reader = new StreamReader(stream, Encoding.UTF8, leaveOpen: true);
+        var buffer = new char[4096];
+        var offset = 0;
+        var available = 0;
+        var received = 0;
+        var skipLineFeed = false;
+        var currentLine = new StringBuilder();
+
+        async ValueTask<string?> ReadBoundedLineAsync()
+        {
+            currentLine.Clear();
+            while (true)
+            {
+                if (offset == available)
+                {
+                    available = await reader.ReadAsync(buffer.AsMemory(), token).ConfigureAwait(false);
+                    offset = 0;
+                    if (available == 0)
+                        return currentLine.Length == 0 ? null : currentLine.ToString();
+
+                    received += available;
+                    if (received > MaxStreamLength)
+                        throw new AiException("Поток API превысил допустимый размер.");
+                }
+
+                var character = buffer[offset++];
+                if (skipLineFeed)
+                {
+                    skipLineFeed = false;
+                    if (character == '\n')
+                        continue;
+                }
+
+                if (character is '\r' or '\n')
+                {
+                    skipLineFeed = character == '\r';
+                    return currentLine.ToString();
+                }
+
+                if (currentLine.Length == MaxEventLength)
+                    throw new AiException("Строка потока API превысила допустимый размер.");
+
+                currentLine.Append(character);
+            }
+        }
+
         var answer = new StringBuilder();
         var pending = new StringBuilder();
         var data = new StringBuilder();
@@ -35,7 +82,7 @@ internal static class ResponseParser
 
         while (!done)
         {
-            var line = await reader.ReadLineAsync(token).ConfigureAwait(false);
+            var line = await ReadBoundedLineAsync().ConfigureAwait(false);
             if (string.IsNullOrEmpty(line))
             {
                 if (data.Length > 0)
@@ -80,7 +127,7 @@ internal static class ResponseParser
             }
             else if (line.StartsWith("data:", StringComparison.Ordinal))
             {
-                if (data.Length + line.Length > 512 * 1024)
+                if (data.Length + line.Length > MaxEventLength)
                     throw new AiException("Фрагмент потока превысил допустимый размер.");
 
                 if (data.Length > 0)

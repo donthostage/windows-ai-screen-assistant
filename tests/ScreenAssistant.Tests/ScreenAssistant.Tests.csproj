@@ -14,4 +14,7 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" PrivateAssets="all" />
     <Using Include="Xunit" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ScreenAssistant.Server\ScreenAssistant.Server.csproj" />
+  </ItemGroup>
 </Project>

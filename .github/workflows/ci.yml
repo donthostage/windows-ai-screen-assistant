@@ -5,6 +5,9 @@ on:
     branches: [main, master]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build-test:
     runs-on: windows-latest
@@ -19,3 +22,31 @@ jobs:
         run: dotnet build .\ScreenAssistant.sln -c Release --no-restore
       - name: Test
         run: dotnet test .\ScreenAssistant.sln -c Release --no-build --verbosity normal
+      - name: Test license API
+        shell: pwsh
+        run: ./scripts/Test-LicenseApi.ps1
+      - name: Publish Windows x64 test build
+        shell: pwsh
+        run: |
+          dotnet publish ./src/ScreenAssistant/ScreenAssistant.csproj -c Release -r win-x64 --self-contained true -o ./publish/windows-x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path ./publish/windows-x64/ScreenAssistant.exe -PathType Leaf)) {
+            throw "ScreenAssistant.exe is missing from the published output."
+          }
+      - name: Upload Windows x64 test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenAssistant-win-x64-${{ github.sha }}
+          path: publish/windows-x64/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Build unsigned Windows MSIX
+        shell: pwsh
+        run: ./scripts/Build-WindowsPackage.ps1 -PublishedDirectory ./publish/windows-x64 -OutputPath ./publish/ScreenAssistant-x64-unsigned.msix -Version 0.1.0.0
+      - name: Upload unsigned Windows MSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenAssistant-msix-unsigned-${{ github.sha }}
+          path: publish/ScreenAssistant-x64-unsigned.msix
+          if-no-files-found: error
+          retention-days: 14
