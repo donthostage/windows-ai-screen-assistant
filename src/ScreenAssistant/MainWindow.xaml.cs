@@ -1060,8 +1060,6 @@ public partial class MainWindow : Window
         if (WindowState == WindowState.Minimized)
             WindowState = WindowState.Normal;
         Activate();
-        Topmost = true;
-        Topmost = false;
     }
 
     private void RequestExit()

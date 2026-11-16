@@ -26,6 +26,7 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
     private readonly DispatcherTimer _saveTimer;
     private OverlayWindow? _window;
     private Window? _mainWindow;
+    private bool _controlsInFront;
     private bool _dirty;
     private bool _solidBackground;
     private bool _clickThrough = true;
@@ -62,8 +63,38 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
     {
         _mainWindow = mainWindow;
         mainWindow.BindOverlaySettings(_viewModel);
+        var app = Application.Current;
+        var appActive = mainWindow.IsActive;
+        app.Activated += (_, _) =>
+        {
+            appActive = true;
+            UpdateControlsLayer();
+        };
+        app.Deactivated += (_, _) =>
+        {
+            appActive = false;
+            UpdateControlsLayer();
+        };
+        mainWindow.IsVisibleChanged += (_, _) => UpdateControlsLayer();
+        mainWindow.StateChanged += (_, _) => UpdateControlsLayer();
+
+        void UpdateControlsLayer()
+        {
+            _controlsInFront = appActive && mainWindow.IsVisible
+                && mainWindow.WindowState != WindowState.Minimized;
+            ApplyWindowLayer();
+        }
+
         mainWindow.AnswerAutoscrollToggled += () => _window?.ToggleAnswerAutoscroll();
         mainWindow.AnswerScrollRequested += down => _window?.ScrollAnswer(down);
+    }
+
+    private void ApplyWindowLayer()
+    {
+        if (_mainWindow is { } main)
+            main.Topmost = _controlsInFront && _window is not null;
+        if (_window is { } overlay)
+            overlay.Topmost = !_controlsInFront;
     }
 
     public void SetEnabledPreference(bool enabled)
@@ -134,6 +165,7 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
         _window = window;
         try
         {
+            ApplyWindowLayer();
             window.Show();
             if (_clickThrough)
                 window.SetClickThrough(true);
@@ -151,6 +183,7 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
         {
             window.Closed -= UserClosed;
             _window = null;
+            ApplyWindowLayer();
             window.Close();
             throw;
         }
@@ -162,6 +195,7 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
             return;
 
         _window = null;
+        ApplyWindowLayer();
         _exclusionRecoveryTried = false;
         current.Closed -= UserClosed;
         current.Close();
@@ -198,6 +232,7 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
             window.Closed -= UserClosed;
 
         _window = null;
+        ApplyWindowLayer();
         _exclusionRecoveryTried = false;
         CloseRequested?.Invoke(this, EventArgs.Empty);
     }
