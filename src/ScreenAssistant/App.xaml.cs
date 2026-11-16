@@ -2,7 +2,6 @@ using System.Net.Http;
 using System.Windows;
 using System.Windows.Threading;
 using ScreenAssistant.Configuration;
-using ScreenAssistant.Core.AIClient;
 using ScreenAssistant.Core.Overlay;
 using ScreenAssistant.Overlay;
 
@@ -38,7 +37,7 @@ public partial class App : Application
         var preferences = OverlayPreferences.Load();
         var renderer = new WpfOverlayRenderer(preferences, settings => settings.Save());
         var overlay = new OverlayManager(new WpfOverlayDispatcher(Dispatcher), renderer);
-        var main = new MainWindow(new AiClient(_http),
+        var main = new MainWindow(
             new ScreenAssistant.Core.Licensing.ActivationClient(_http), overlay,
             preferences.Enabled, renderer.SetEnabledPreference);
         renderer.Attach(main);

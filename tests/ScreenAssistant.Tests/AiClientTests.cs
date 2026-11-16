@@ -24,6 +24,9 @@ public sealed class AiClientTests
             Assert.False(json.RootElement.GetProperty("stream").GetBoolean());
             var content = json.RootElement.GetProperty("messages")[0].GetProperty("content");
             Assert.Equal("text", content[0].GetProperty("type").GetString());
+            var prompt = content[0].GetProperty("text").GetString();
+            Assert.Contains("адресная строка", prompt);
+            Assert.Contains("условие видно не полностью", prompt);
             Assert.Equal("image_url", content[1].GetProperty("type").GetString());
             Assert.Equal("data:image/png;base64,AQID",
                 content[1].GetProperty("image_url").GetProperty("url").GetString());
@@ -333,6 +336,9 @@ public sealed class AiClientTests
             Assert.Equal(1, messages.GetArrayLength());
             var parts = messages[0].GetProperty("content");
             Assert.Equal(3, parts.GetArrayLength());
+            var prompt = parts[0].GetProperty("text").GetString();
+            Assert.Contains("длинной страницы", prompt);
+            Assert.Contains("условие видно не полностью", prompt);
             Assert.Equal("data:image/png;base64,AQID", parts[1].GetProperty("image_url").GetProperty("url").GetString());
             Assert.Equal("data:image/jpeg;base64,BAU=", parts[2].GetProperty("image_url").GetProperty("url").GetString());
             return Json("""{"choices":[{"message":{"content":"Готово"}}]}""");

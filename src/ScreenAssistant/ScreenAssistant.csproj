@@ -9,7 +9,14 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <LicenseServerUrl Condition="'$(LicenseServerUrl)' == ''">http://127.0.0.1:5080/</LicenseServerUrl>
   </PropertyGroup>
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>LicenseServerUrl</_Parameter1>
+      <_Parameter2>$(LicenseServerUrl)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../ScreenAssistant.Core/ScreenAssistant.Core.csproj" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />

@@ -30,7 +30,6 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
     private bool _dirty;
     private bool _solidBackground;
     private bool _clickThrough = true;
-    private bool _exclusionRecoveryTried;
     private OverlayPreferences? _lastSaved;
 
     public WpfOverlayRenderer(OverlayPreferences preferences, Action<OverlayPreferences> save)
@@ -80,10 +79,21 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
 
         void UpdateControlsLayer()
         {
+            if (mainWindow.SystemDialogOpen)
+            {
+                _controlsInFront = false;
+                if (_window is { } overlay)
+                    overlay.Topmost = false;
+                mainWindow.Topmost = false;
+                return;
+            }
+
             _controlsInFront = appActive && mainWindow.IsVisible
                 && mainWindow.WindowState != WindowState.Minimized;
             ApplyWindowLayer();
         }
+
+        mainWindow.SystemDialogChanged += UpdateControlsLayer;
 
         mainWindow.AnswerAutoscrollToggled += () => _window?.ToggleAnswerAutoscroll();
         mainWindow.AnswerScrollRequested += down => _window?.ScrollAnswer(down);
@@ -170,14 +180,7 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
             if (_clickThrough)
                 window.SetClickThrough(true);
             if (_viewModel.Preferences.ExcludeFromCapture && !window.IsExcludedFromCapture)
-            {
                 CaptureExclusionFailed?.Invoke(this, EventArgs.Empty);
-                if (!_exclusionRecoveryTried)
-                {
-                    _exclusionRecoveryTried = true;
-                    _viewModel.SolidBackground = true;
-                }
-            }
         }
         catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
         {
@@ -196,7 +199,6 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
 
         _window = null;
         ApplyWindowLayer();
-        _exclusionRecoveryTried = false;
         current.Closed -= UserClosed;
         current.Close();
     }
@@ -233,7 +235,6 @@ internal sealed class WpfOverlayRenderer : IOverlayRenderer
 
         _window = null;
         ApplyWindowLayer();
-        _exclusionRecoveryTried = false;
         CloseRequested?.Invoke(this, EventArgs.Empty);
     }
 }

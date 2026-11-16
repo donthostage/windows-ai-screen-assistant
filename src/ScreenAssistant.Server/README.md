@@ -24,7 +24,7 @@ dotnet run --project src/ScreenAssistant.Server -- --urls http://127.0.0.1:5080
 Build the solution in Release and run `pwsh -File scripts/Test-LicenseApi.ps1`
 from the repository root to check the HTTP flow against a temporary database.
 
-In the Windows client, open «Активировать лицензию…» in settings, enter the server address and the code, and select the key storage. The client saves the license ID, server address and storage selection locally. The HTTP test also exercises the activation client with an ephemeral key.
+In the Windows client, enter the activation code on the first screen. The server address comes from the `LicenseServerUrl` build property, not from the user. The client saves the license ID and key storage locally. The HTTP test also exercises the activation client with an ephemeral key.
 
 Authenticated analysis requests, usage accounting, operator audit logs and production hosting are still required for the pilot.
 

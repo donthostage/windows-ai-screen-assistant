@@ -1,6 +1,11 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.IO;
+using System.Net;
+using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
@@ -9,7 +14,6 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using ScreenAssistant.Configuration;
 using ScreenAssistant.Core.AIClient;
-using ScreenAssistant.Core.Geometry;
 using ScreenAssistant.Core.Overlay;
 using ScreenAssistant.Core.Scheduler;
 using ScreenAssistant.Hotkeys;
@@ -30,7 +34,6 @@ public partial class MainWindow : Window
     private const int WsExAppWindow = 0x00040000;
     private const int WsExToolWindow = 0x00000080;
 
-    private readonly AiClient _ai;
     private readonly Core.Licensing.ActivationClient _activation;
     private readonly IOverlayService _overlay;
     private readonly Action<bool> _persistOverlayEnabled;
@@ -38,7 +41,8 @@ public partial class MainWindow : Window
     private GraphicsCaptureItem? _source;
     private string? _approvedCaptureDestination;
     private bool _confirmingCapture;
-    private Uri? _keyEndpoint;
+    private bool _activating;
+    private LicenseReceipt? _license;
     private CancellationTokenSource? _operation;
     private TaskCompletionSource? _operationFinished;
     private long _requestVersion;
@@ -57,14 +61,12 @@ public partial class MainWindow : Window
     private bool _shutdownComplete;
     private bool _sourceLost;
     private bool _operationUsesSource;
-    private bool _keyVisible;
     private int _requests;
     private int _answers;
 
-    internal MainWindow(AiClient ai, Core.Licensing.ActivationClient activation, IOverlayService overlay,
+    internal MainWindow(Core.Licensing.ActivationClient activation, IOverlayService overlay,
         bool overlayEnabled, Action<bool> persistOverlayEnabled)
     {
-        _ai = ai;
         _activation = activation;
         _overlay = overlay;
         _persistOverlayEnabled = persistOverlayEnabled;
@@ -81,35 +83,59 @@ public partial class MainWindow : Window
         {
             _tray ??= new AppTrayIcon(ShowFromTray, RequestExit, StopFromTray);
             await ApplyOverlayVisibilityAsync();
-            HideToTray();
+            Activate();
+            if (_license is null)
+            {
+                ActivationCode.Focus();
+                Status("Введите код активации, затем выберите источник.");
+            }
+            else
+                Status("Код уже принят. Выберите источник и нажмите «Запустить анализ».");
         };
         _initialized = true;
         try
         {
             var settings = UserSettings.Load();
-            BaseUrl.Text = settings.BaseUrl;
-            ModelId.Text = settings.Model;
             PeriodicInterval.Text = settings.IntervalSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
         catch (Exception ex)
         {
             LocalFiles.Log("settings-load", ex);
-            BaseUrl.Text = AiClient.DefaultBaseUrl;
             Status("Настройки не загрузились. Восстановлены значения по умолчанию.", error: true);
         }
+
+        RefreshLicenseState();
 
         UpdateControls();
         UpdateStats();
     }
 
     internal event Action? AnswerAutoscrollToggled;
-    private CropRect? _nextCrop;
     internal event Action<bool>? AnswerScrollRequested;
+    internal bool SystemDialogOpen { get; private set; }
+    internal event Action? SystemDialogChanged;
+
+    private IDisposable OpenSystemDialog()
+    {
+        SystemDialogOpen = true;
+        Topmost = false;
+        SystemDialogChanged?.Invoke();
+        return new SystemDialogScope(this);
+    }
+
+    private sealed class SystemDialogScope(MainWindow window) : IDisposable
+    {
+        public void Dispose()
+        {
+            window.SystemDialogOpen = false;
+            window.SystemDialogChanged?.Invoke();
+        }
+    }
 
     internal void BindOverlaySettings(OverlayViewModel model) => OverlayOptions.DataContext = model;
 
     internal void WarnOverlayCaptureInclusion() =>
-        Status("Оверлей виден в записи. Включите плотный фон", error: true);
+        Status("Оверлей не скрыт из записи.", error: true);
 
     private void ResetOverlayPosition_Click(object sender, RoutedEventArgs e)
     {
@@ -204,7 +230,7 @@ public partial class MainWindow : Window
             await _overlay.SetVisibleAsync(enabled);
             _persistOverlayEnabled(enabled);
             if (enabled && !await _overlay.EnsureExcludedAsync())
-                await OnUiAsync(() => Status("Оверлей виден в записи. Включите плотный фон", error: true));
+                await OnUiAsync(() => Status("Оверлей не скрыт из записи.", error: true));
         }
         catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
         {
@@ -217,55 +243,126 @@ public partial class MainWindow : Window
         }
     }
 
-    private void BaseUrl_Changed(object sender, TextChangedEventArgs e)
+    private void ShowActivation_Click(object sender, RoutedEventArgs e)
     {
-        if (!_initialized)
+        LicenseReadyPanel.Visibility = Visibility.Collapsed;
+        ActivationPanel.Visibility = Visibility.Visible;
+        ActivationCode.Focus();
+    }
+
+    private void RefreshLicenseState()
+    {
+        if (!TryLoadLicense(out var license))
             return;
 
-        AiClient.TryParseBaseUrl(BaseUrl.Text, out var endpoint);
-        if (endpoint == _keyEndpoint)
+        _license = license;
+        var ready = license is not null;
+        LicenseReadyPanel.Visibility = ready ? Visibility.Visible : Visibility.Collapsed;
+        ActivationPanel.Visibility = ready ? Visibility.Collapsed : Visibility.Visible;
+        if (ready)
+            LicenseReadyText.Text = "Код принят. Можно выбирать источник.";
+    }
+
+    private async void Activate_Click(object sender, RoutedEventArgs e)
+    {
+        if (_activating)
             return;
 
-        _keyEndpoint = endpoint;
-        ApiKey.Clear();
-        ApiKeyPlain.Text = "";
-        if (endpoint is null)
+        if (!BuildConfiguration.TryGetLicenseServer(out var server) || server is null)
+        {
+            ActivationStatus.Text = "В этой сборке не задан адрес сервера.";
+            Status("В этой сборке не задан адрес сервера.", error: true);
             return;
+        }
 
+        var code = ActivationCode.Password.Trim();
+        if (code.Length != 64 || !code.All(Uri.IsHexDigit))
+        {
+            ActivationStatus.Text = "Проверьте код активации: нужны 64 шестнадцатеричных символа.";
+            Status("Код активации не подошёл.", error: true);
+            ActivationCode.Focus();
+            return;
+        }
+
+        var hardwareBacked = HardwareKey.IsChecked == true;
+        _activating = true;
+        ActivateButton.IsEnabled = ActivationCode.IsEnabled = HardwareKey.IsEnabled = false;
+        ActivationStatus.Text = "Активируем код…";
         try
         {
-            var key = KeyStore.Read(endpoint);
-            ApiKey.Password = key;
-            ApiKeyPlain.Text = key;
+            using var key = WindowsDeviceKey.OpenOrCreate(hardwareBacked);
+            var licenseId = await _activation.ActivateAsync(server, code, key, CancellationToken.None);
+            ActivationCode.Clear();
+            new LicenseReceipt(server.AbsoluteUri, licenseId, hardwareBacked).Save();
+            RefreshLicenseState();
+            ActivationStatus.Text = "Код принят.";
+            Status("Код принят. Теперь выберите источник.");
+            PickButton.Focus();
         }
-        catch (Exception ex)
+        catch (CryptographicException ex)
         {
-            LocalFiles.Log("key-load", ex);
-            Status("Ключ не удалось прочитать. Введите его заново.", error: true);
+            LocalFiles.Log("license-key", ex);
+            HardwareKey.Visibility = Visibility.Visible;
+            HardwareKey.IsChecked = false;
+            ActivationStatus.Text = hardwareBacked
+                ? "Не удалось открыть ключ TPM. Снимите галочку и активируйте ещё раз."
+                : "Не удалось открыть ключ устройства.";
+            Status(ActivationStatus.Text, error: true);
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.BadRequest)
+        {
+            ActivationStatus.Text = "Сервер отклонил код. Проверьте его или обратитесь к оператору.";
+            Status(ActivationStatus.Text, error: true);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or InvalidDataException or JsonException or OperationCanceledException)
+        {
+            LocalFiles.Log("license-activate", ex);
+            ActivationStatus.Text = "Не удалось подтвердить код. Проверьте подключение к серверу.";
+            Status(ActivationStatus.Text, error: true);
+        }
+        finally
+        {
+            _activating = false;
+            ActivateButton.IsEnabled = ActivationCode.IsEnabled = HardwareKey.IsEnabled = true;
         }
     }
 
-    private void ShowKey_Click(object sender, RoutedEventArgs e)
+    private async void Balance_Click(object sender, RoutedEventArgs e)
     {
-        _keyVisible = !_keyVisible;
-        if (_keyVisible)
+        if (_activating || _license is not { } receipt)
+            return;
+
+        if (!BuildConfiguration.TryGetLicenseServer(out var server) || server is null)
         {
-            ApiKeyPlain.Text = ApiKey.Password;
-            ApiKey.Visibility = Visibility.Collapsed;
-            ApiKeyPlain.Visibility = Visibility.Visible;
-            ShowKeyButton.Content = "скрыть";
+            Status("В этой сборке не задан адрес сервера.", error: true);
+            return;
         }
-        else
+
+        _activating = true;
+        BalanceButton.IsEnabled = false;
+        try
         {
-            ApiKey.Password = ApiKeyPlain.Text;
-            ApiKeyPlain.Visibility = Visibility.Collapsed;
-            ApiKey.Visibility = Visibility.Visible;
-            ShowKeyButton.Content = "показать";
+            Status("Проверяем доступ…");
+            using var key = WindowsDeviceKey.OpenOrCreate(receipt.HardwareBacked);
+            var balance = await _activation.ReadAvailableCreditsAsync(server, receipt.LicenseId, key, CancellationToken.None);
+            var text = balance is { } credits
+                ? $"Доступ открыт. Кредитов: {credits}."
+                : "Сервер не подтвердил лицензию.";
+            LicenseReadyText.Text = text;
+            Status(text, error: balance is null);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException
+            or JsonException or CryptographicException or HttpRequestException or OperationCanceledException)
+        {
+            LocalFiles.Log("license-balance", ex);
+            Status("Не удалось проверить доступ. Проверьте подключение к серверу.", error: true);
+        }
+        finally
+        {
+            _activating = false;
+            BalanceButton.IsEnabled = true;
         }
     }
-
-    private string CurrentApiKey() =>
-        _keyVisible ? ApiKeyPlain.Text.Trim() : ApiKey.Password.Trim();
 
     private void PeriodicInterval_PreviewTextInput(object sender, TextCompositionEventArgs e) =>
         e.Handled = !Regex.IsMatch(e.Text, "^[0-9]+$");
@@ -286,8 +383,26 @@ public partial class MainWindow : Window
     private async void Pick_Click(object sender, RoutedEventArgs e) =>
         await RunOperationAsync("picker", async token =>
         {
-            await OnUiAsync(() => Status("Выберите монитор в системном окне…"));
-            var item = await GraphicsCapture.PickAsync(new WindowInteropHelper(this).Handle, token);
+            var restoreOverlay = false;
+            await OnUiAsync(() =>
+            {
+                restoreOverlay = OverlayEnabled.IsChecked == true;
+                Status("В системном окне выберите Chrome и нажмите ОК.");
+            });
+            GraphicsCaptureItem? item;
+            try
+            {
+                using var systemDialog = OpenSystemDialog();
+                if (restoreOverlay)
+                    await _overlay.SetVisibleAsync(false);
+                item = await GraphicsCapture.PickAsync(new WindowInteropHelper(this).Handle, token);
+            }
+            finally
+            {
+                if (restoreOverlay && OverlayEnabled.IsChecked == true)
+                    await _overlay.SetVisibleAsync(true);
+            }
+
             token.ThrowIfCancellationRequested();
             if (item is null)
             {
@@ -300,41 +415,19 @@ public partial class MainWindow : Window
                 DetachSource();
                 _source = item;
                 item.Closed += Source_Closed;
-                SourceText.Text = item.DisplayName;
+                var name = string.IsNullOrWhiteSpace(item.DisplayName) ? "окно без имени" : item.DisplayName;
+                SourceText.Text = $"Выбран источник: {name}";
+                NextStepText.Text = "Следующий шаг — «Запустить анализ».";
+                NextStepText.FontWeight = FontWeights.SemiBold;
+                NextStepText.Foreground = new SolidColorBrush(Color.FromRgb(0x22, 0x4F, 0xAD));
+                StartCue.Visibility = Visibility.Visible;
                 ClearPreview();
-                Status("Источник выбран.");
+                Status($"Источник «{name}» выбран. Нажмите «Запустить анализ».");
+                UpdateControls();
+                Activate();
+                StartPeriodicButton.Focus();
             });
-
         });
-
-    private void Crop_Click(object sender, RoutedEventArgs e)
-    {
-        if (_source is null)
-        {
-            Status("Сначала выберите источник захвата.", error: true);
-            return;
-        }
-
-        SelectNextCrop();
-    }
-
-    private void SelectNextCrop()
-    {
-        var picker = new CropSelectionWindow();
-        if (picker.ShowDialog() != true)
-            return;
-
-        var relative = MonitorGeometry.ToMonitorRelative(picker.SelectedPixels, picker.SelectedMonitor);
-        if (relative.IsEmpty)
-        {
-            Status("Слишком маленькая область", error: true);
-            return;
-        }
-
-        _nextCrop = relative;
-        FrameDetails.Text = $"область {relative.Width} × {relative.Height} · {relative.X}, {relative.Y}";
-        Status("Область выбрана для следующего кадра.");
-    }
 
     private async void Borderless_Click(object sender, RoutedEventArgs e)
     {
@@ -371,40 +464,6 @@ public partial class MainWindow : Window
         });
     }
 
-    private async void Catalog_Click(object sender, RoutedEventArgs e) =>
-        await RunOperationAsync("catalog", async token =>
-        {
-            await OnUiAsync(() => Status("Загружаем каталог AI Tunnel…"));
-            var current = await OnUiAsync(() => ModelId.Text);
-            var models = await _ai.ListVisionModelsAsync(token);
-            token.ThrowIfCancellationRequested();
-            await OnUiAsync(() =>
-            {
-                ModelId.ItemsSource = models;
-                ModelId.Text = current;
-                Status(models.Length == 0
-                    ? "В каталоге нет моделей для изображений. Можно ввести ID вручную."
-                    : $"Моделей с поддержкой изображений: {models.Length}. Откройте список «Модель».");
-            });
-        });
-
-    private void Save_Click(object sender, RoutedEventArgs e)
-    {
-        if (!ReadSettings(out var settings, out var endpoint))
-            return;
-        try
-        {
-            KeyStore.Save(endpoint, CurrentApiKey());
-            settings.Save();
-            Status("Настройки сохранены.");
-        }
-        catch (Exception ex)
-        {
-            LocalFiles.Log("settings-save", ex);
-            Status("Не удалось сохранить настройки. Проверьте доступ к профилю Windows.", error: true);
-        }
-    }
-
     private async Task<bool> ReplaceOperationAsync()
     {
         var version = ++_requestVersion;
@@ -434,13 +493,16 @@ public partial class MainWindow : Window
         HistoryList.SelectedIndex = 0;
     }
 
-    private void ActivateLicense_Click(object sender, RoutedEventArgs e) =>
-        new Licensing.ActivationWindow(_activation) { Owner = this }.ShowDialog();
-
     private async void StartPeriodic_Click(object sender, RoutedEventArgs e)
     {
-        if (_operation is not null || _periodic is not null || _scheduler is not null || _source is not { } source)
+        if (_operation is not null || _periodic is not null || _scheduler is not null)
             return;
+        if (_source is not { } source)
+        {
+            Status("Сначала выберите источник.", error: true);
+            PickButton.Focus();
+            return;
+        }
         if (!int.TryParse(PeriodicInterval.Text, out var seconds) || seconds is < 5 or > 3600)
         {
             PeriodicInterval.BorderBrush = Error;
@@ -449,48 +511,35 @@ public partial class MainWindow : Window
         }
         if (!TryLoadLicense(out var license))
             return;
+        if (license is null || !BuildConfiguration.TryGetLicenseServer(out var server) || server is null)
+        {
+            Status("Сначала введите код активации.", error: true);
+            ShowActivation_Click(this, e);
+            return;
+        }
 
-        string model;
-        Func<ImagePayload, CancellationToken, Task<string>> analyze;
+        if (!ConfirmCaptureDestination(source, server))
+        {
+            Status("Отправка кадров отменена. Источник по-прежнему выбран.");
+            return;
+        }
+
         UserSettings settings;
-        if (license is not null)
+        try
         {
-            var server = new Uri(license.Server);
-            if (!ConfirmCaptureDestination(source, server, licensed: true))
-                return;
-
-            settings = UserSettings.Load();
-            model = "Сервер лицензий";
-            analyze = (image, token) => RunLicensedAnalysisAsync(license, key =>
-                _activation.AnalyzeAsync(server, license.LicenseId,
-                    Guid.NewGuid(), key, image, token));
+            settings = UserSettings.Load() with { IntervalSeconds = seconds };
+            settings.Save();
         }
-        else
+        catch (Exception ex)
         {
-            if (!ReadSettings(out settings, out var endpoint))
-                return;
-
-            var key = CurrentApiKey();
-            model = settings.Model;
-            if (key.Length == 0 || string.IsNullOrWhiteSpace(model))
-            {
-                Status("Выберите модель и введите ключ.", error: true);
-                return;
-            }
-            if (!ConfirmCaptureDestination(source, endpoint, licensed: false))
-                return;
-
-            analyze = (image, token) => _ai.AnalyzeAsync(endpoint, key, model, image, token);
-            try
-            {
-                KeyStore.Save(endpoint, key);
-                settings.Save();
-            }
-            catch (Exception ex)
-            {
-                LocalFiles.Log("settings-autosave", ex);
-            }
+            LocalFiles.Log("settings-autosave", ex);
+            settings = new() { IntervalSeconds = seconds };
         }
+
+        var model = "Сервер лицензий";
+        Func<ImagePayload, CancellationToken, Task<string>> analyze = (image, token) =>
+            RunLicensedAnalysisAsync(license, key =>
+                _activation.AnalyzeAsync(server, license.LicenseId, Guid.NewGuid(), key, image, token));
 
         var session = new PeriodicAnalysis(source, model, analyze,
             TimeSpan.FromSeconds(seconds), TimeSpan.FromMinutes(settings.DurationMinutes));
@@ -523,7 +572,10 @@ public partial class MainWindow : Window
         }
         _periodicCapture = capture;
         UpdateControls();
-        Status("Периодический анализ запущен.");
+        var sourceName = string.IsNullOrWhiteSpace(source.DisplayName) ? "выбранное окно" : source.DisplayName;
+        Status($"Передача кадров разрешена: «{sourceName}». Снимаем первый кадр…");
+        CaptureStatus.Text = "Снимаем кадр";
+        CaptureLight.Fill = Active;
         _ = RunPeriodicLoopAsync(session, token);
     }
 
@@ -582,7 +634,12 @@ public partial class MainWindow : Window
         if (_closing || _shutdownComplete)
             return null;
 
-        await OnUiAsync(() => Status("Периодический анализ · получаем кадр…"));
+        await OnUiAsync(() =>
+        {
+            CaptureStatus.Text = "Снимаем кадр";
+            CaptureLight.Fill = Active;
+            Status("Снимаем кадр выбранного окна…");
+        });
         var frame = await CaptureAsync(session.Source, token);
         if (frame.Fingerprint == _lastAnalyzedFrame)
         {
@@ -590,23 +647,43 @@ public partial class MainWindow : Window
             return null;
         }
 
+        var waitingForFirst = _answers == 0;
         await OnUiAsync(() =>
         {
             _requests++;
             UpdateStats();
-            Status("Периодический анализ · ждём ответ…");
+            CaptureStatus.Text = "Отправка";
+            CaptureLight.Fill = Active;
+            Status(waitingForFirst
+                ? $"Кадр {frame.Width} × {frame.Height} отправлен. Ждём первый ответ…"
+                : $"Кадр {frame.Width} × {frame.Height} отправлен. Ждём ответ…");
         });
 
         try
         {
             await ShowAnalysisAsync(session.Model,
                 ct => session.Analyze(frame.Payload, ct),
-                frame.Fingerprint, "Ответ готов. Периодический анализ продолжается.", token);
+                frame.Fingerprint,
+                waitingForFirst
+                    ? "Первый ответ получен. Анализ продолжается."
+                    : "Ответ готов. Анализ продолжается.", token);
+            await OnUiAsync(() =>
+            {
+                CaptureStatus.Text = "Ответ получен";
+                CaptureLight.Fill = Active;
+            });
             return null;
         }
         catch (AiException ex)
         {
-            await OnUiAsync(() => Status(ex.Message, error: true));
+            await OnUiAsync(() =>
+            {
+                AnswerTab.IsSelected = true;
+                AnswerText.Text = ex.Message;
+                CaptureStatus.Text = "Ошибка отправки";
+                CaptureLight.Fill = Error;
+                Status(ex.Message, error: true);
+            });
             if (ex.RequiresConfigurationChange)
             {
                 await OnUiAsync(StopPeriodic);
@@ -628,8 +705,13 @@ public partial class MainWindow : Window
         catch (InvalidOperationException ex)
         {
             LocalFiles.Log("overlay-begin", ex);
-            await OnUiAsync(() => Status("Оверлей закрыт. Включите плавающий ответ.", error: true));
-            throw;
+            await OnUiAsync(() =>
+            {
+                AnswerTab.IsSelected = true;
+                AnswerText.Text = "Оверлей закрыт. Включите плавающий ответ.";
+                Status(AnswerText.Text, error: true);
+            });
+            throw new AiException("Оверлей закрыт. Включите плавающий ответ.");
         }
 
         try
@@ -641,7 +723,7 @@ public partial class MainWindow : Window
             _lastAnalyzedFrame = lastFrame;
             await OnUiAsync(() =>
             {
-                AddAnswer(model, result, selectAnswerTab: false);
+                AddAnswer(model, result);
                 Status(status);
             });
         }
@@ -693,39 +775,23 @@ public partial class MainWindow : Window
         }
         if (!TryLoadLicense(out var license))
             return;
-        string model;
-        Func<IReadOnlyList<ImagePayload>, CancellationToken, Task<string>> analyze;
-        if (license is not null)
+        if (license is null || !BuildConfiguration.TryGetLicenseServer(out var server) || server is null)
         {
-            var server = new Uri(license.Server);
-            if (!ConfirmCaptureDestination(source, server, licensed: true))
-                return;
-
-            model = "Сервер лицензий";
-            analyze = (frames, token) => RunLicensedAnalysisAsync(license, key =>
-                _activation.AnalyzeSeriesAsync(server, license.LicenseId,
-                    Guid.NewGuid(), key, frames, token));
+            ShowFromTray();
+            Status("Сначала введите код активации.", error: true);
+            ShowActivation_Click(this, new RoutedEventArgs());
+            return;
         }
-        else
+        if (!ConfirmCaptureDestination(source, server))
         {
-            if (!ReadSettings(out var settings, out var endpoint))
-            {
-                ShowFromTray();
-                return;
-            }
-            var key = CurrentApiKey();
-            model = settings.Model;
-            if (key.Length == 0 || string.IsNullOrWhiteSpace(model))
-            {
-                ShowFromTray();
-                Status("Выберите модель и введите ключ.", error: true);
-                return;
-            }
-            if (!ConfirmCaptureDestination(source, endpoint, licensed: false))
-                return;
-
-            analyze = (frames, token) => _ai.AnalyzeScrollAsync(endpoint, key, model, frames, token);
+            Status("Отправка кадров отменена. Источник по-прежнему выбран.");
+            return;
         }
+
+        var model = "Сервер лицензий";
+        Func<IReadOnlyList<ImagePayload>, CancellationToken, Task<string>> analyze = (frames, token) =>
+            RunLicensedAnalysisAsync(license, key =>
+                _activation.AnalyzeSeriesAsync(server, license.LicenseId, Guid.NewGuid(), key, frames, token));
 
         if (!await ReplaceOperationAsync())
             return;
@@ -783,18 +849,11 @@ public partial class MainWindow : Window
         });
         try
         {
-            CropRect? crop = null;
-            await OnUiAsync(() =>
-            {
-                token.ThrowIfCancellationRequested();
-                crop = _nextCrop;
-                _nextCrop = null;
-            });
             CapturedImage image;
             if (_periodicCapture is { } capture)
-                image = await capture.TakeAsync(crop, token);
+                image = await capture.TakeAsync(null, token);
             else
-                image = await GraphicsCapture.TakeOnceAsync(source, crop, token, _borderlessCapture);
+                image = await GraphicsCapture.TakeOnceAsync(source, null, token, _borderlessCapture);
 
             token.ThrowIfCancellationRequested();
             await OnUiAsync(() =>
@@ -832,6 +891,10 @@ public partial class MainWindow : Window
         {
             if (name == "scroll" && !_closing)
                 ShowFromTray();
+            AnswerTab.IsSelected = true;
+            AnswerText.Text = message;
+            CaptureStatus.Text = "Ошибка";
+            CaptureLight.Fill = Error;
             Status(message, error: true);
         });
 
@@ -895,7 +958,11 @@ public partial class MainWindow : Window
                 _operation?.Cancel();
             DetachSource();
             ClearPreview();
-            SourceText.Text = "Источник закрыт. Выберите монитор.";
+            SourceText.Text = "Источник закрыт. Выберите окно ещё раз.";
+            NextStepText.Text = "Нажмите «Выбрать…», укажите окно Chrome и подтвердите ОК.";
+            NextStepText.FontWeight = FontWeights.Normal;
+            NextStepText.Foreground = (Brush)FindResource("Muted");
+            StartCue.Visibility = Visibility.Collapsed;
             Status("Доступ к источнику захвата потерян.", error: true);
             UpdateControls();
         });
@@ -907,25 +974,27 @@ public partial class MainWindow : Window
         FrameDetails.Text = "";
     }
 
-    private bool ConfirmCaptureDestination(GraphicsCaptureItem source, Uri destination, bool licensed)
+    private bool ConfirmCaptureDestination(GraphicsCaptureItem source, Uri destination)
     {
         if (_confirmingCapture || _closing || _shutdownComplete || !ReferenceEquals(_source, source))
             return false;
 
-        var approval = (licensed ? "licensed " : "direct ") + destination.AbsoluteUri;
+        var approval = destination.AbsoluteUri;
         if (_approvedCaptureDestination == approval)
             return true;
 
         _confirmingCapture = true;
         try
         {
-            var route = licensed ? "Сервер передаёт кадры в AI Tunnel для анализа." : "Кадры отправляются напрямую в API.";
-            var message = $"Источник захвата · {source.DisplayName}\n"
-                + $"Получатель · {destination.AbsoluteUri}\n\n"
-                + $"{route} На кадрах может быть видно всё содержимое выбранного источника. "
+            var name = string.IsNullOrWhiteSpace(source.DisplayName) ? "выбранное окно" : source.DisplayName;
+            var message = $"Источник · {name}\n"
+                + $"Получатель · сервер подписки ({destination.Host})\n\n"
+                + "Будет отправлено всё содержимое этого окна. "
                 + "Остановка в приложении прекращает отправку новых кадров.\n\n"
-                + "Разрешить отправку кадров для анализа?";
+                + "Разрешить передачу кадров?";
             ShowFromTray();
+            using var systemDialog = OpenSystemDialog();
+            Activate();
             if (MessageBox.Show(this, message, "Передача кадров", MessageBoxButton.YesNo,
                 MessageBoxImage.Information, MessageBoxResult.No) != MessageBoxResult.Yes
                 || _closing || _shutdownComplete || !ReferenceEquals(_source, source))
@@ -946,7 +1015,6 @@ public partial class MainWindow : Window
             source.Closed -= Source_Closed;
         _source = null;
         _approvedCaptureDestination = null;
-        _nextCrop = null;
     }
 
     private void History_Changed(object sender, SelectionChangedEventArgs e)
@@ -987,36 +1055,16 @@ public partial class MainWindow : Window
         }
     }
 
-    private bool ReadSettings(out UserSettings settings, out Uri endpoint)
-    {
-        settings = new();
-        endpoint = null!;
-        if (!AiClient.TryParseBaseUrl(BaseUrl.Text, out var parsed))
-        {
-            Status("Введите HTTPS Base URL API, например https://api.aitunnel.ru/v1.", error: true);
-            BaseUrl.Focus();
-            return false;
-        }
-        endpoint = parsed!;
-        var loaded = UserSettings.Load();
-        settings = loaded with
-        {
-            BaseUrl = endpoint.AbsoluteUri.TrimEnd('/'),
-            Model = ModelId.Text.Trim(),
-            IntervalSeconds = int.TryParse(PeriodicInterval.Text, out var interval) && interval is >= 5 and <= 3600
-                ? interval : loaded.IntervalSeconds
-        };
-        return true;
-    }
-
     private void UpdateControls()
     {
         var idle = _operation is null;
         var periodicIdle = _periodic is null && _scheduler is null;
         PickButton.IsEnabled = idle && periodicIdle;
-        CropButton.IsEnabled = idle && periodicIdle && _source is not null;
-        SettingsPanel.IsEnabled = idle;
+        ActivationPanel.IsEnabled = idle && !_activating;
+        PeriodicInterval.IsEnabled = idle;
         StartPeriodicButton.IsEnabled = idle && periodicIdle && _source is not null;
+        if (_source is null)
+            StartCue.Visibility = Visibility.Collapsed;
         StopButton.IsEnabled = !periodicIdle || _operation is { IsCancellationRequested: false };
     }
 
