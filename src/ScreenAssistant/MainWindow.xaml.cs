@@ -42,6 +42,7 @@ public partial class MainWindow : Window
     private string? _approvedCaptureDestination;
     private bool _confirmingCapture;
     private bool _activating;
+    private bool _checkingBalance;
     private LicenseReceipt? _license;
     private CancellationTokenSource? _operation;
     private TaskCompletionSource? _operationFinished;
@@ -90,7 +91,10 @@ public partial class MainWindow : Window
                 Status("Введите код активации, затем выберите источник.");
             }
             else
+            {
                 Status("Код уже принят. Выберите источник и нажмите «Запустить анализ».");
+                await RefreshBalanceAsync(reportStatus: false);
+            }
         };
         _initialized = true;
         try
@@ -255,6 +259,13 @@ public partial class MainWindow : Window
         if (!TryLoadLicense(out var license))
             return;
 
+        if (license is not null
+            && (!BuildConfiguration.TryGetLicenseServer(out var server) || server != new Uri(license.Server)))
+        {
+            license = null;
+            ActivationStatus.Text = "Эта сборка подключена к другому серверу. Введите код для него.";
+        }
+
         _license = license;
         var ready = license is not null;
         LicenseReadyPanel.Visibility = ready ? Visibility.Visible : Visibility.Collapsed;
@@ -298,6 +309,7 @@ public partial class MainWindow : Window
             ActivationStatus.Text = "Код принят.";
             Status("Код принят. Теперь выберите источник.");
             PickButton.Focus();
+            await RefreshBalanceAsync(reportStatus: false);
         }
         catch (CryptographicException ex)
         {
@@ -305,7 +317,7 @@ public partial class MainWindow : Window
             HardwareKey.Visibility = Visibility.Visible;
             HardwareKey.IsChecked = false;
             ActivationStatus.Text = hardwareBacked
-                ? "Не удалось открыть ключ TPM. Снимите галочку и активируйте ещё раз."
+                ? "TPM недоступен. Снова нажмите «Активировать», чтобы использовать программный ключ."
                 : "Не удалось открыть ключ устройства.";
             Status(ActivationStatus.Text, error: true);
         }
@@ -314,7 +326,7 @@ public partial class MainWindow : Window
             ActivationStatus.Text = "Сервер отклонил код. Проверьте его или обратитесь к оператору.";
             Status(ActivationStatus.Text, error: true);
         }
-        catch (Exception ex) when (ex is HttpRequestException or IOException or InvalidDataException or JsonException or OperationCanceledException)
+        catch (Exception ex) when (ex is HttpRequestException or IOException or InvalidDataException or UnauthorizedAccessException or JsonException or OperationCanceledException)
         {
             LocalFiles.Log("license-activate", ex);
             ActivationStatus.Text = "Не удалось подтвердить код. Проверьте подключение к серверу.";
@@ -327,9 +339,12 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void Balance_Click(object sender, RoutedEventArgs e)
+    private async void Balance_Click(object sender, RoutedEventArgs e) =>
+        await RefreshBalanceAsync(reportStatus: true);
+
+    private async Task RefreshBalanceAsync(bool reportStatus)
     {
-        if (_activating || _license is not { } receipt)
+        if (_checkingBalance || _license is not { } receipt)
             return;
 
         if (!BuildConfiguration.TryGetLicenseServer(out var server) || server is null)
@@ -338,28 +353,41 @@ public partial class MainWindow : Window
             return;
         }
 
-        _activating = true;
+        _checkingBalance = true;
         BalanceButton.IsEnabled = false;
         try
         {
-            Status("Проверяем доступ…");
+            if (reportStatus)
+                Status("Проверяем доступ…");
             using var key = WindowsDeviceKey.OpenOrCreate(receipt.HardwareBacked);
             var balance = await _activation.ReadAvailableCreditsAsync(server, receipt.LicenseId, key, CancellationToken.None);
-            var text = balance is { } credits
-                ? $"Доступ открыт. Кредитов: {credits}."
-                : "Сервер не подтвердил лицензию.";
+            if (_closing || !Equals(_license, receipt))
+                return;
+
+            var text = balance switch
+            {
+                null => "Сервер не подтвердил лицензию. Проверьте покупку или обратитесь в поддержку.",
+                0 => "Лимит анализа исчерпан.",
+                _ => $"Доступ открыт. Кредитов: {balance}."
+            };
             LicenseReadyText.Text = text;
-            Status(text, error: balance is null);
+            if (reportStatus)
+                Status(text, error: balance is null or 0);
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException
             or JsonException or CryptographicException or HttpRequestException or OperationCanceledException)
         {
             LocalFiles.Log("license-balance", ex);
-            Status("Не удалось проверить доступ. Проверьте подключение к серверу.", error: true);
+            if (!_closing && Equals(_license, receipt))
+            {
+                LicenseReadyText.Text = "Не удалось проверить лимит. Повторите проверку.";
+                if (reportStatus)
+                    Status("Не удалось проверить доступ. Проверьте подключение к серверу.", error: true);
+            }
         }
         finally
         {
-            _activating = false;
+            _checkingBalance = false;
             BalanceButton.IsEnabled = true;
         }
     }
