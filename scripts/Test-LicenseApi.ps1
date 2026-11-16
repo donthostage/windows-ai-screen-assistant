@@ -1,6 +1,6 @@
 param(
     [string] $Dotnet = 'dotnet',
-    [string] $ServerDll = (Join-Path $PSScriptRoot '../src/ScreenAssistant.Server/bin/Release/net8.0/ScreenAssistant.Server.dll')
+    [string] $ServerDll = (Join-Path $PSScriptRoot '../src/ScreenAssistant.Server/bin/Release/net10.0/ScreenAssistant.Server.dll')
 )
 
 $ErrorActionPreference = 'Stop'

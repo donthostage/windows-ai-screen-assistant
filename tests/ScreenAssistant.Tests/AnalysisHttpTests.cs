@@ -31,7 +31,7 @@ public sealed class AnalysisHttpTests
             certificateRequest.CertificateExtensions.Add(names.Build());
             using var generated = certificateRequest.CreateSelfSigned(
                 DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(1));
-            using var certificate = new X509Certificate2(generated.Export(X509ContentType.Pfx));
+            using var certificate = X509CertificateLoader.LoadPkcs12(generated.Export(X509ContentType.Pfx), password: null);
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.ConfigureKestrel(options =>
             {

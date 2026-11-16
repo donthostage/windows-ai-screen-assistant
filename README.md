@@ -4,7 +4,7 @@ WPF-приложение для периодического анализа и �
 
 ## Сборка и запуск
 
-Нужна Windows 10 версии 2004 (сборка 19041) или новее, включая Windows 11, и [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0). Для запуска framework-dependent сборки нужен **.NET Desktop Runtime 8**. На компьютере с SDK той же архитектуры он уже установлен. Windows Graphics Capture требует интерактивного рабочего стола и проверяется при открытии системного выбора.
+Нужна Windows 10 версии 2004 (сборка 19041) или новее, включая Windows 11, и [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0). Для запуска framework-dependent сборки нужен **.NET Desktop Runtime 10**. На компьютере с SDK той же архитектуры он уже установлен. Windows Graphics Capture требует интерактивного рабочего стола и проверяется при открытии системного выбора.
 
 В **Visual Studio 2022 17.8+** установите рабочую нагрузку «Разработка классических приложений .NET», откройте `ScreenAssistant.sln`, выберите `ScreenAssistant` запускаемым проектом и нажмите F5. В VS Code откройте папку проекта и выполните в PowerShell:
 
